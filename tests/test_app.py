@@ -7,7 +7,7 @@ Akış: kurulum (Oyuncu A -> "Oyuncu B'ye geç" -> Oyuncu B -> "Maçı başlat")
 Kadro düzeni sırası gelen tarafın ekranında "Kadro düzeni" bölümünde yapılır: iki araç vardır:
   1) "İlk 11'den oyuncu" <-> "Yedekten oyuncu" (swap_bench)
   2) "Yedekten oyuncu" <-> "Rezervden oyuncu" (swap_reserve)
-Her iki araç da "Yer değiştir" düğmesiyle çalışır; "Yedekten oyuncu" etiketi iki araçta da geçtiği
+1. araç "Yer değiştir", 2. araç "Rezervle yer değiştir" düğmesiyle çalışır; "Yedekten oyuncu" etiketi iki araçta da geçtiği
 için bu testler aynı etiketli selectbox'ları sayfadaki sırayla ayırır (1. araç = ilk "Yedekten
 oyuncu", 2. araç = ikinci). Selectbox değerleri listedeki indekstir; takas hedefi/verilen ve koruma
 oyuncu id'siyle seçilir (id'ler session_state['state']'ten alınır).
@@ -46,6 +46,7 @@ SEL_SLOT = "İlk 11'den oyuncu"
 SEL_BENCH = "Yedekten oyuncu"
 SEL_RESERVE = "Rezervden oyuncu"
 BTN_SWAP = "Yer değiştir"
+BTN_SWAP_RESERVE = "Rezervle yer değiştir"
 BTN_CONFIRM_ARRANGE = "Düzeni onayla"
 BTN_NEW_MATCH = "Yeni maç"
 TAG_BENCH = "[yedek]"
@@ -196,7 +197,7 @@ def swap_bench_with_reserve(at, bench_idx, reserve_idx):
     """2. araç: "Yedekten oyuncu" <-> "Rezervden oyuncu" (ikinci "Yedekten oyuncu" selectbox'ı)."""
     find_all(at, "selectbox", SEL_BENCH)[1].set_value(bench_idx).run()
     find_all(at, "selectbox", SEL_RESERVE)[0].set_value(reserve_idx).run()
-    find_all(at, "button", BTN_SWAP)[1].click().run()
+    find(at, "button", BTN_SWAP_RESERVE).click().run()
 
 
 def finish_arrangement(at):

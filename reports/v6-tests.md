@@ -33,3 +33,5 @@ Durum: bitti
 
 ## Commit
 - tests/test_engine.py, tests/test_app.py, reports/v6-tests.md (commit hash aşağıda).
+- 2026-10-07 düzeltme: test_app.py'de 2. araç düğmesi etiketle bulunuyor (BTN_SWAP_RESERVE = "Rezervle yer değiştir"); IndexError giderildi, 90/90 OK.
+- Yalnızca tests/test_app.py ve bu rapor değiştirildi; app.py ve engine.py dokunulmadı.
