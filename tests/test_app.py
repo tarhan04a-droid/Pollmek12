@@ -1,16 +1,17 @@
-"""Streamlit uygulama testleri (docs/CONTRACT.md "Güncelleme 5" > Uygulama).
+"""Streamlit uygulama testleri (docs/CONTRACT.md "Güncelleme 6" > Uygulama).
 
 streamlit kurulu değilse veya app.py yoksa testler atlanır.
-Akış: kurulum (Oyuncu A -> "Oyuncu B'ye geç" -> Oyuncu B -> "Maçı başlat") -> kadrolar (ilk 11 +
-"Yedekler") -> "Takas turlarını başlat" -> takas ("Takası yap") -> koruma ("Korumayı onayla")
--> ... -> son takas -> arrange ("Düzeni onayla" A, sonra B) -> sonuç.
-Kadro düzeni (ilk 11 <-> yedek yer değiştirme) sırası gelen tarafın ekranında "Kadro düzeni"
-bölümünde yapılır.
+Akış: kurulum (Oyuncu A -> "Oyuncu B'ye geç" -> Oyuncu B -> "Maçı başlat") -> kadrolar (ilk 11,
+"Yedekler" [yedek] ve "Rezervler" [rezerv] ayrı) -> "Takas turlarını başlat" -> takas ("Takası yap")
+-> koruma ("Korumayı onayla") -> ... -> son takas -> arrange ("Düzeni onayla" A, sonra B) -> sonuç.
+Kadro düzeni sırası gelen tarafın ekranında "Kadro düzeni" bölümünde yapılır: iki araç vardır:
+  1) "İlk 11'den oyuncu" <-> "Yedekten oyuncu" (swap_bench)
+  2) "Yedekten oyuncu" <-> "Rezervden oyuncu" (swap_reserve)
+Her iki araç da "Yer değiştir" düğmesiyle çalışır; "Yedekten oyuncu" etiketi iki araçta da geçtiği
+için bu testler aynı etiketli selectbox'ları sayfadaki sırayla ayırır (1. araç = ilk "Yedekten
+oyuncu", 2. araç = ikinci). Selectbox değerleri listedeki indekstir; takas hedefi/verilen ve koruma
+oyuncu id'siyle seçilir (id'ler session_state['state']'ten alınır).
 
-Widget'lar etiketleriyle bulunur. Beklenen etiketler aşağıdaki sabitlerde toplandı; app.py farklı
-etiket kullanırsa yalnızca bu sabitler güncellenir. Oyuncu seçimleri (selectbox/multiselect) için
-`.options` etiketlerdir, `set_value` ise oyuncu id'si ister; id'ler session_state['state'] üzerinden
-alınır.
 Çalıştırma (repo kökünden):  python3 -m unittest discover -s tests -p "test_*.py"
 """
 import json
@@ -39,16 +40,22 @@ SEL_TARGET = "Rakipten alınacak oyuncu"
 SEL_GIVE = "Karşılığında verilecek oyuncu"
 MULTI_PROTECT = "Korunacak oyuncular"
 HDR_BENCH = "Yedekler"
+HDR_RESERVE = "Rezervler"
 HDR_LAYOUT = "Kadro düzeni"
 SEL_SLOT = "İlk 11'den oyuncu"
 SEL_BENCH = "Yedekten oyuncu"
+SEL_RESERVE = "Rezervden oyuncu"
 BTN_SWAP = "Yer değiştir"
 BTN_CONFIRM_ARRANGE = "Düzeni onayla"
 BTN_NEW_MATCH = "Yeni maç"
+TAG_BENCH = "[yedek]"
+TAG_RESERVE = "[rezerv]"
 PROTECT_MAX = 3
 TOTAL_STEALS = 6
-BENCH_SIZE = 4
-SQUAD_SIZE = 15
+FIRST_ELEVEN = 11
+BENCH_SIZE = 8
+RESERVE_SIZE = 4
+SQUAD_SIZE = FIRST_ELEVEN + BENCH_SIZE + RESERVE_SIZE  # 23
 OTHER_SIDE = {"A": "B", "B": "A"}
 
 
@@ -57,6 +64,10 @@ def find(at, kind, label):
     if not matches:
         raise AssertionError(f"{kind} etiketi bulunamadı: {label!r}")
     return matches[0]
+
+
+def find_all(at, kind, label):
+    return [w for w in at.get(kind) if getattr(w, "label", None) == label]
 
 
 def has(at, kind, label):
@@ -119,7 +130,7 @@ def setup_two_sides(at):
 
 
 def squad_players(at, side):
-    """İlk 11 oyuncu nesneleri (id, name, pos, rating...) session_state'teki maç durumundan okunur."""
+    """İlk 11 oyuncu nesneleri (session_state'teki maç durumundan)."""
     state = at.session_state["state"]
     return [slot["player"] for slot in state["sides"][side]["slots"]]
 
@@ -136,6 +147,21 @@ def bench_ids(at, side):
     return [p["id"] for p in bench_players(at, side)]
 
 
+def reserve_players(at, side):
+    return at.session_state["state"]["sides"][side]["reserves"]
+
+
+def reserve_ids(at, side):
+    return [p["id"] for p in reserve_players(at, side)]
+
+
+def all_ids(state, side):
+    s = state["sides"][side]
+    return ([slot["player"]["id"] for slot in s["slots"]]
+            + [p["id"] for p in s["bench"]]
+            + [p["id"] for p in s["reserves"]])
+
+
 def steal_and_protect(at, keep_first=PROTECT_MAX):
     """Sıradaki takası yapar; takas sonrası koruma çıkarsa ilk `keep_first` oyuncuyu korur.
 
@@ -143,10 +169,9 @@ def steal_and_protect(at, keep_first=PROTECT_MAX):
     state = at.session_state["state"]
     turn = state["turn"]
     other = OTHER_SIDE[turn]
-    # Seçimler id ile yapılır: hedef rakipten korumasız ilk oyuncu, karşılık kendi korumasız ilk oyuncusu.
-    target = next(pid for pid in squad_ids(at, other) + bench_ids(at, other)
+    target = next(pid for pid in all_ids(state, other)
                   if pid not in state["sides"][other]["protected_ids"])
-    give = next(pid for pid in squad_ids(at, turn) + bench_ids(at, turn)
+    give = next(pid for pid in all_ids(state, turn)
                 if pid not in state["sides"][turn]["protected_ids"])
     find(at, "selectbox", SEL_TARGET).set_value(target).run()
     find(at, "selectbox", SEL_GIVE).set_value(give).run()
@@ -154,18 +179,24 @@ def steal_and_protect(at, keep_first=PROTECT_MAX):
     if not has(at, "multiselect", MULTI_PROTECT):
         return target, False
     turn = at.session_state["state"]["turn"]
-    chosen = (squad_ids(at, turn) + bench_ids(at, turn))[:keep_first]
+    chosen = all_ids(at.session_state["state"], turn)[:keep_first]
     find(at, "multiselect", MULTI_PROTECT).set_value(chosen).run()
     find(at, "button", BTN_PROTECT).click().run()
     return target, True
 
 
-def swap_by_index(at, slot_idx, bench_idx):
-    """Kadro düzeni bölümünde ilk 11 (slot_idx) ile yedek (bench_idx) yer değiştirir.
-    Bu selectbox'ların değerleri oyuncu id'si değil, listedeki indekstir."""
-    find(at, "selectbox", SEL_SLOT).set_value(slot_idx).run()
-    find(at, "selectbox", SEL_BENCH).set_value(bench_idx).run()
-    find(at, "button", BTN_SWAP).click().run()
+def swap_slot_with_bench(at, slot_idx, bench_idx):
+    """1. araç: "İlk 11'den oyuncu" <-> "Yedekten oyuncu" (ilk "Yedekten oyuncu" selectbox'ı)."""
+    find_all(at, "selectbox", SEL_SLOT)[0].set_value(slot_idx).run()
+    find_all(at, "selectbox", SEL_BENCH)[0].set_value(bench_idx).run()
+    find_all(at, "button", BTN_SWAP)[0].click().run()
+
+
+def swap_bench_with_reserve(at, bench_idx, reserve_idx):
+    """2. araç: "Yedekten oyuncu" <-> "Rezervden oyuncu" (ikinci "Yedekten oyuncu" selectbox'ı)."""
+    find_all(at, "selectbox", SEL_BENCH)[1].set_value(bench_idx).run()
+    find_all(at, "selectbox", SEL_RESERVE)[0].set_value(reserve_idx).run()
+    find_all(at, "button", BTN_SWAP)[1].click().run()
 
 
 def finish_arrangement(at):
@@ -262,49 +293,54 @@ class AppSetupFlowTest(unittest.TestCase):
 @unittest.skipIf(AppTest is None, "streamlit kurulu değil")
 @unittest.skipUnless(os.path.exists(APP_PATH), "app.py yok")
 class AppSquadTest(unittest.TestCase):
-    def test_squad_screen_shows_four_bench_players_per_side(self):
+    def test_squad_screen_shows_bench_and_reserves_as_separate_lists(self):
         at = setup_two_sides(start_app())
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
-        self.assertIn(HDR_BENCH, all_text(at))
+        text = all_text(at)
+        self.assertIn(HDR_BENCH, text)
+        self.assertIn(HDR_RESERVE, text)
         for side in ("A", "B"):
+            self.assertEqual(len(squad_ids(at, side)), FIRST_ELEVEN)
             self.assertEqual(len(bench_players(at, side)), BENCH_SIZE)
-            self.assertEqual(len(squad_ids(at, side)) + len(bench_ids(at, side)), SQUAD_SIZE)
-            for player in bench_players(at, side):
-                self.assertIn(player["name"], all_text(at))
+            self.assertEqual(len(reserve_players(at, side)), RESERVE_SIZE)
+            self.assertEqual(len(all_ids(at.session_state["state"], side)), SQUAD_SIZE)
+            for player in bench_players(at, side) + reserve_players(at, side):
+                self.assertIn(player["name"], text)
 
-    def test_steal_selectors_list_all_fifteen_players(self):
+    def test_steal_selectors_list_all_23_with_tags(self):
         at = setup_two_sides(start_app())
         find(at, "button", BTN_START_STEALS).click().run()
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
-        self.assertEqual(len(find(at, "selectbox", SEL_TARGET).options), SQUAD_SIZE)
-        self.assertEqual(len(find(at, "selectbox", SEL_GIVE).options), SQUAD_SIZE)
-        # Uygulama yedekleri küçük harfle "[yedek]" olarak etiketler; büyük/küçük harf duyarsız ara.
         target_opts = find(at, "selectbox", SEL_TARGET).options
-        self.assertEqual(sum("yedek" in o.lower() for o in target_opts), BENCH_SIZE)
+        give_opts = find(at, "selectbox", SEL_GIVE).options
+        self.assertEqual(len(target_opts), SQUAD_SIZE)
+        self.assertEqual(len(give_opts), SQUAD_SIZE)
+        self.assertEqual(sum(TAG_BENCH in o for o in target_opts), BENCH_SIZE)
+        self.assertEqual(sum(TAG_RESERVE in o for o in target_opts), RESERVE_SIZE)
 
-    def test_protect_selector_lists_all_fifteen_players(self):
+    def test_protect_selector_lists_all_23_players(self):
         at = setup_two_sides(start_app())
         find(at, "button", BTN_START_STEALS).click().run()
         find(at, "button", BTN_STEAL).click().run()
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertEqual(len(find(at, "multiselect", MULTI_PROTECT).options), SQUAD_SIZE)
 
-    def test_bench_player_can_be_protected(self):
+    def test_bench_and_reserve_players_can_be_protected(self):
         at = setup_two_sides(start_app())
         find(at, "button", BTN_START_STEALS).click().run()
         find(at, "button", BTN_STEAL).click().run()
         turn = at.session_state["state"]["turn"]
-        bench_pid = bench_ids(at, turn)[0]
-        find(at, "multiselect", MULTI_PROTECT).set_value([bench_pid]).run()
+        chosen = [bench_ids(at, turn)[0], reserve_ids(at, turn)[0]]
+        find(at, "multiselect", MULTI_PROTECT).set_value(chosen).run()
         find(at, "button", BTN_PROTECT).click().run()
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
-        self.assertEqual(at.session_state["state"]["sides"][turn]["protected_ids"], [bench_pid])
+        self.assertEqual(at.session_state["state"]["sides"][turn]["protected_ids"], chosen)
 
 
 @unittest.skipIf(AppTest is None, "streamlit kurulu değil")
 @unittest.skipUnless(os.path.exists(APP_PATH), "app.py yok")
 class AppArrangeSwapTest(unittest.TestCase):
-    def test_layout_section_swaps_slot_with_bench_player(self):
+    def test_tool_one_swaps_first_eleven_with_bench(self):
         at = setup_two_sides(start_app())
         find(at, "button", BTN_START_STEALS).click().run()
         turn = at.session_state["state"]["turn"]
@@ -312,11 +348,26 @@ class AppArrangeSwapTest(unittest.TestCase):
         bench_pid = bench_ids(at, turn)[0]
 
         self.assertIn(HDR_LAYOUT, all_text(at))
-        swap_by_index(at, 0, 0)
+        swap_slot_with_bench(at, 0, 0)
 
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertEqual(squad_ids(at, turn)[0], bench_pid)
         self.assertEqual(bench_ids(at, turn)[0], slot_pid)
+
+    def test_tool_two_swaps_bench_with_reserve(self):
+        at = setup_two_sides(start_app())
+        find(at, "button", BTN_START_STEALS).click().run()
+        turn = at.session_state["state"]["turn"]
+        bench_pid = bench_ids(at, turn)[2]
+        reserve_pid = reserve_ids(at, turn)[1]
+
+        swap_bench_with_reserve(at, 2, 1)
+
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertEqual(bench_ids(at, turn)[2], reserve_pid)
+        self.assertEqual(reserve_ids(at, turn)[1], bench_pid)
+        self.assertEqual(len(bench_ids(at, turn)), BENCH_SIZE)
+        self.assertEqual(len(reserve_ids(at, turn)), RESERVE_SIZE)
 
     def test_layout_warns_when_positions_do_not_match(self):
         at = setup_two_sides(start_app())
@@ -329,12 +380,10 @@ class AppArrangeSwapTest(unittest.TestCase):
         if pair is None:
             self.skipTest("uyumsuz pozisyonlu yedek-ilk11 çifti yok")
         slot_idx, bench_idx = pair
-        find(at, "selectbox", SEL_SLOT).set_value(slot_idx).run()
-        find(at, "selectbox", SEL_BENCH).set_value(bench_idx).run()
-        # Sayfada her zaman bulunan uyarılardan ayırmak için uyumsuzluk metnine bak.
+        find_all(at, "selectbox", SEL_SLOT)[0].set_value(slot_idx).run()
+        find_all(at, "selectbox", SEL_BENCH)[0].set_value(bench_idx).run()
         self.assertTrue(any("Uyumsuz" in w.value for w in at.warning),
                         [w.value for w in at.warning])
-
 
 
 @unittest.skipIf(AppTest is None, "streamlit kurulu değil")
@@ -373,24 +422,29 @@ class AppArrangeAndResultTest(unittest.TestCase):
         self.assertEqual(at.session_state["state"]["phase"], "done")
         self.assertFalse(has(at, "button", BTN_CONFIRM_ARRANGE))
 
-    def test_arrange_allows_layout_swaps_for_both_sides(self):
+    def test_arrange_allows_both_swap_tools_for_both_sides(self):
         at = setup_two_sides(start_app())
         self.play_until_arrange(at)
-        side = "A"
-        bench_pid = bench_ids(at, side)[1]
-        swap_by_index(at, 1, 1)
+
+        bench_pid = bench_ids(at, "A")[1]
+        swap_slot_with_bench(at, 1, 1)
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
-        self.assertEqual(squad_ids(at, side)[1], bench_pid)
+        self.assertEqual(squad_ids(at, "A")[1], bench_pid)
+
+        reserve_pid = reserve_ids(at, "A")[3]
+        swap_bench_with_reserve(at, 0, 3)
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertEqual(bench_ids(at, "A")[0], reserve_pid)
 
         find(at, "button", BTN_CONFIRM_ARRANGE).click().run()
         self.assertEqual(at.session_state["state"]["arranged"], {"A": True, "B": False})
-        side = "B"
-        bench_pid = bench_ids(at, side)[2]
-        swap_by_index(at, 2, 2)
-        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
-        self.assertEqual(squad_ids(at, side)[2], bench_pid)
 
-    def test_result_screen_shows_winner_and_bench_players(self):
+        bench_pid = bench_ids(at, "B")[2]
+        swap_slot_with_bench(at, 2, 2)
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertEqual(squad_ids(at, "B")[2], bench_pid)
+
+    def test_result_screen_shows_winner_bench_and_reserves(self):
         at = setup_two_sides(start_app())
         steals = play_full_match(at)
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
@@ -399,8 +453,9 @@ class AppArrangeAndResultTest(unittest.TestCase):
         text = all_text(at)
         self.assertTrue(any(word in text for word in ("kazandı", "Berabere")), text)
         self.assertIn(HDR_BENCH, text)
+        self.assertIn(HDR_RESERVE, text)
         for side in ("A", "B"):
-            for player in bench_players(at, side):
+            for player in bench_players(at, side) + reserve_players(at, side):
                 self.assertIn(player["name"], text)
         self.assertIn(BTN_NEW_MATCH, button_labels(at))
         self.assertEqual(len(at.error), 0, [e.value for e in at.error])

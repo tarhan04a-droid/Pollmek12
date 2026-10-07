@@ -1,10 +1,11 @@
-"""Streamlit sürümü motor testleri (docs/CONTRACT.md "Güncelleme 5" > Motor).
+"""Streamlit sürümü motor testleri (docs/CONTRACT.md "Güncelleme 6" > Motor).
 
 Yalnızca standart unittest. engine.py repo kökünde olmalı; bu dosya kökü sys.path'e ekler.
-Güncelleme 5: her taraf 11 ilk + 4 yedek (15) alır (bench_size varsayılanı 4); takas yedekleri de
-kapsar; koruma 15 oyuncudan; dağıtım kaliteye duyarlıdır (quality_window, varsayılan 10): aday,
-pozisyonunda kalan en iyi oyuncudan en fazla quality_window geride olmalı. quality_window=None eski
-tam rastgele davranış. Son takastan sonra phase "arrange", iki onaydan sonra "done".
+Güncelleme 6: her taraf 11 ilk 11 + 8 yedek + 4 rezerv = 23 oyuncu alır. Takas ve koruma üç
+gruptan herhangi birini kapsar (23 oyuncu). Yerleştirme: swap_bench (ilk 11 <-> yedek) ve
+swap_reserve (yedek <-> rezerv). Takım puanı ilk 11 (slot_score) + 8 yedek (düz rating)
+ortalamasıdır (19 oyuncu); rezervler puana girmez. Kalite penceresi (varsayılan 10) kaleci
+slotunda 90/80/71/68 örneğiyle test edilir.
 Çalıştırma (repo kökünden):  python3 -m unittest discover -s tests -p "test_*.py"
 """
 import copy
@@ -25,12 +26,19 @@ from engine import (  # noqa: E402
     slot_score,
     steal,
     swap_bench,
+    swap_reserve,
     team_rating,
 )
 
-BENCH_SIZE = 4
-SQUAD_SIZE = 11 + BENCH_SIZE
+FIRST_ELEVEN = 11
+BENCH_SIZE = 8
+RESERVE_SIZE = 4
+SQUAD_SIZE = FIRST_ELEVEN + BENCH_SIZE + RESERVE_SIZE  # 23
+PROTECT_COUNT = 3
+STEALS_PER_SIDE = 3
 QUALITY_WINDOW = 10
+SIDES = ("A", "B")
+OTHER = {"A": "B", "B": "A"}
 
 FORMATION_433 = {
     "id": "4-3-3",
@@ -44,9 +52,16 @@ FORMATION_352 = {
     "id": "3-5-2",
     "slots": ["GK", "CB", "CB", "CB", "LM", "CDM", "CAM", "CM", "RM", "ST", "ST"],
 }
-ALL_FORMATIONS = (FORMATION_433, FORMATION_442, FORMATION_352)
-POSITIONS = sorted({pos for f in ALL_FORMATIONS for pos in f["slots"]})
+FORMATION_4231 = {
+    "id": "4-2-3-1",
+    "slots": ["GK", "LB", "CB", "CB", "RB", "CDM", "CDM", "LW", "CAM", "RW", "ST"],
+}
+LABELS = ["GK", "LB", "CB", "RB", "CM", "CDM", "CAM", "LM", "RM", "LW", "RW", "ST"]
+OUTFIELD_LABELS = [label for label in LABELS if label != "GK"]
+PLAYERS_PATH = os.path.join(ROOT, "data", "players.json")
 
+
+# ---------------------------------------------------------------- veri yardımcıları
 
 def make_player(pid, pos, club="Alpha", league="L1", nation="Nationa", rating=75, alt=None):
     return {
@@ -62,987 +77,725 @@ def make_player(pid, pos, club="Alpha", league="L1", nation="Nationa", rating=75
     }
 
 
-def make_pool():
-    """Alpha ve Beta: her pozisyondan 3'er oyuncu (L1; ülkeleri farklı) -> 36'şar oyuncu.
-    Gamma: sadece 3 ST (yetersiz havuz)."""
+def make_pool(prefix, club, count=120, labels=LABELS, base=70):
+    """Aynı kulüpte, pozisyonları döngüsel dağılmış, puanları 70-89 arası oyuncular."""
     players = []
-    pid = 1
-    for club, nation in (("Alpha", "Nationa"), ("Beta", "Nationb")):
-        for _ in range(3):
-            for pos in POSITIONS:
-                players.append(make_player(pid, pos, club=club, league="L1", nation=nation,
-                                           rating=60 + (pid * 7) % 35))
-                pid += 1
-    for _ in range(3):
-        players.append(make_player(pid, "ST", club="Gamma", league="L2", nation="Nationa",
-                                   rating=75))
-        pid += 1
+    for i in range(count):
+        pos = labels[i % len(labels)]
+        players.append(make_player(f"{prefix}{i:03d}", pos, club=club,
+                                   rating=base + (i * 7) % 20))
     return players
 
 
-PLAYERS = make_pool()
-PLAYERS_BY_ID = {p["id"]: p for p in PLAYERS}
-CLUB_ALPHA = [{"type": "club", "value": "Alpha"}]
-CLUB_BETA = [{"type": "club", "value": "Beta"}]
-LEAGUE_L1 = [{"type": "league", "value": "L1"}]
+def gk_pool(prefix, club):
+    """Dört kaleci (90, 80, 71, 68) + kalesiz bol oyuncu."""
+    keepers = [make_player(f"{prefix}gk{r}", "GK", club=club, rating=r) for r in (90, 80, 71, 68)]
+    return keepers + make_pool(prefix, club, count=120, labels=OUTFIELD_LABELS)
 
 
-def setup(categories=CLUB_ALPHA, formation=FORMATION_433):
-    return {"categories": copy.deepcopy(categories), "formation": copy.deepcopy(formation)}
+def setup(club, formation):
+    return {"categories": [{"type": "club", "value": club}], "formation": formation}
 
 
-def default_setups():
-    return {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_433)}
+def two_side_setups(a_club="Alpha", b_club="Beta", a_formation=FORMATION_433,
+                    b_formation=FORMATION_442):
+    return {"A": setup(a_club, a_formation), "B": setup(b_club, b_formation)}
 
 
-def new_match(setups=None, players=None, **overrides):
-    kwargs = dict(players=players if players is not None else PLAYERS,
-                  setups=setups if setups is not None else default_setups(), seed=1)
-    kwargs.update(overrides)
-    return create_match(**kwargs)
+def base_players():
+    return make_pool("a", "Alpha") + make_pool("b", "Beta")
 
 
-def squad_ids(state, side):
-    """İlk 11 id'leri (slot sırasıyla)."""
-    return [slot["player"]["id"] for slot in state["sides"][side]["slots"]]
+def new_match(seed=1, **kwargs):
+    return create_match(base_players(), two_side_setups(), seed=seed, **kwargs)
 
 
-def bench_ids(state, side):
-    return [p["id"] for p in state["sides"][side]["bench"]]
+def side_players(side_state):
+    return ([s["player"] for s in side_state["slots"]]
+            + list(side_state["bench"]) + list(side_state["reserves"]))
 
 
-def all_ids(state, side):
-    """19 oyuncunun id'leri: önce ilk 11, sonra yedekler."""
-    return squad_ids(state, side) + bench_ids(state, side)
+def side_ids(side_state):
+    return [p["id"] for p in side_players(side_state)]
 
 
-def unprotected_ids(state, side):
-    protected = state["sides"][side]["protected_ids"]
-    return [pid for pid in all_ids(state, side) if pid not in protected]
+def slot_ids(side_state):
+    return [s["player"]["id"] for s in side_state["slots"]]
 
 
-def other(side):
-    return "B" if side == "A" else "A"
+def bench_ids(side_state):
+    return [p["id"] for p in side_state["bench"]]
 
 
-def locate(state, side, pid):
-    """('slot', i) veya ('bench', j); yoksa AssertionError."""
-    for i, slot in enumerate(state["sides"][side]["slots"]):
-        if slot["player"]["id"] == pid:
-            return ("slot", i)
-    for j, player in enumerate(state["sides"][side]["bench"]):
-        if player["id"] == pid:
-            return ("bench", j)
-    raise AssertionError(f"{pid} {side} kadrosunda yok")
+def reserve_ids(side_state):
+    return [p["id"] for p in side_state["reserves"]]
 
 
-def first_steal(state, side=None):
-    """Sıradaki tarafın takasını yapar (koruma adımına GEÇMEZ): rakipten ilk korumasız,
-    kendinden ilk korumasız (ilk 11 ve yedekler dahil)."""
-    side = side or state["turn"]
-    target = unprotected_ids(state, other(side))[0]
-    give = unprotected_ids(state, side)[0]
-    return steal(state, side, target, give)
+def unprotected_ids(side_state):
+    protected = set(side_state["protected_ids"])
+    return [pid for pid in side_ids(side_state) if pid not in protected]
 
 
-def steal_and_protect(state, keep=None):
-    """Bir tam tur: takas + koruma (keep verilmezse kadronun ilk 3'ü). Son takasta koruma yok."""
-    side = state["turn"]
-    state = first_steal(state, side)
-    if state["phase"] != "steal":
-        return state
-    ids = squad_ids(state, side)[:3] if keep is None else keep
-    return protect(state, side, ids)
+def expected_team(state, side):
+    """Güncelleme 6 kuralının doğrudan karşılığı: ilk 11 slot_score + 8 yedek rating, 19'a bölünür."""
+    s = state["sides"][side]
+    total = sum(slot_score(x["pos"], x["player"]) for x in s["slots"])
+    total += sum(p["rating"] for p in s["bench"])
+    return round(total / (len(s["slots"]) + len(s["bench"])))
 
 
-def play_out(state):
-    """Takas aşamasını deterministik seçimlerle bitirir (phase "arrange" olur)."""
+def play_round(state):
+    """Sıradaki takası yapar (ilk korumasız hedef ve verilen); takastan sonra koruma adımı
+    gelirse ilk PROTECT_COUNT kendi oyuncusunu korur."""
+    turn = state["turn"]
+    foe = OTHER[turn]
+    target = unprotected_ids(state["sides"][foe])[0]
+    give = unprotected_ids(state["sides"][turn])[0]
+    state = steal(state, turn, target, give)
+    if state["phase"] == "steal":
+        state = protect(state, turn, side_ids(state["sides"][turn])[:PROTECT_COUNT])
+    return state
+
+
+def play_until_arrange(state):
+    """Takas turlarını sonuna kadar oynar; faz "arrange" olunca döner."""
     while state["phase"] == "steal":
-        state = steal_and_protect(state)
+        state = play_round(state)
     return state
 
 
-def finish_arrange(state):
-    """Her iki taraf da düzeni onaylar (A, sonra B) -> phase "done"."""
-    for side in ("A", "B"):
-        state = confirm_arrange(state, side)
-    return state
+def play_full_match(state):
+    """Tüm takasları oynar, sonra iki tarafın düzenini onaylatır. (son state, takas sayısı)."""
+    steals = 0
+    while state["phase"] == "steal":
+        state = play_round(state)
+        steals += 1
+    state = confirm_arrange(state, "A")
+    state = confirm_arrange(state, "B")
+    return state, steals
 
 
-def team_rating_from_slots(state, side):
-    slots = state["sides"][side]["slots"]
-    return round(sum(slot_score(s["pos"], s["player"]) for s in slots) / len(slots))
+def manual_player(pid, pos, rating, alt=None):
+    return make_player(pid, pos, rating=rating, alt=alt)
 
 
-def pool_for(players, categories):
-    """Tarafın kategorilerine uyan oyuncular (motorun havuzuyla aynı tanım)."""
-    return [p for p in players
-            if any(p.get(c["type"]) == c["value"] for c in categories)]
+def manual_side(slot_entries, bench, reserves=()):
+    """slot_entries: [(slot_pos, player)] listesi."""
+    return {
+        "slots": [{"pos": pos, "player": player} for pos, player in slot_entries],
+        "bench": list(bench),
+        "reserves": list(reserves),
+        "protected_ids": [],
+    }
 
 
-def assert_quality_window(test, state, side, pool, window=QUALITY_WINDOW):
-    """Kalite penceresi sözleşmesi, sıra bağımsız biçimde:
-    - İlk 11 slotu S için seçilen d, aday kümesinde (önce pos==S, yoksa alt'ta S) kalan en iyi
-      oyuncunun en fazla `window` geridedir. Kalan oyuncular dağıtım boyunca müsaitti, bu yüzden
-      her kalan L için d.rating >= L.rating - window olmalıdır (aynı kümede).
-    - Yedek d, birincil pozisyonu P için: her kalan L (L.pos == P) için d.rating >= L.rating - window.
-    Pencere dışı oyuncu yalnızca başka uygun aday yoksa seçilebilir; bu durumda kontrol zaten
-    geçer (kalan uygun aday yoktur)."""
-    roster = set(all_ids(state, side))
-    leftovers = [p for p in pool if p["id"] not in roster]
-    for slot in state["sides"][side]["slots"]:
-        s_pos, d = slot["pos"], slot["player"]
-        if d["pos"] == s_pos:
-            same_tier = [L for L in leftovers if L["pos"] == s_pos]
-        else:
-            test.assertFalse(any(L["pos"] == s_pos for L in leftovers),
-                             f"{side} {s_pos} slotuna alt pozisyon oyuncusu verildi, "
-                             "oysa kalan birincil pozisyon adayı vardı")
-            same_tier = [L for L in leftovers if s_pos in (L.get("alt") or [])]
-        for L in same_tier:
-            test.assertGreaterEqual(
-                d["rating"], L["rating"] - window,
-                f"{side} {s_pos} slotuna {d['rating']} puanlı oyuncu geldi; "
-                f"kalan {L['rating']} puanlı aday pencere ({window}) içinde")
-    for player in state["sides"][side]["bench"]:
-        for L in leftovers:
-            if L["pos"] == player["pos"]:
-                test.assertGreaterEqual(
-                    player["rating"], L["rating"] - window,
-                    f"{side} yedeği {player['pos']} {player['rating']} puanlı; "
-                    f"kalan {L['rating']} puanlı aday pencere ({window}) içinde")
+def manual_state(side_a, side_b, phase="done"):
+    return {"phase": phase, "sides": {"A": side_a, "B": side_b}}
 
+
+# ---------------------------------------------------------------- kurulum
 
 class CreateMatchTests(unittest.TestCase):
-    def test_pool_too_small_raises_and_names_side(self):
-        setups = default_setups()
-        setups["B"] = setup([{"type": "club", "value": "Gamma"}], FORMATION_433)
-        with self.assertRaises(ValueError) as cm:
-            new_match(setups=setups)
-        self.assertRegex(str(cm.exception), r"\bB\b")
-
-    def test_pool_of_fourteen_is_too_small_for_eleven_plus_four(self):
-        # 11 ilk oyuncu tek başına yeterli, ama 15 için 14 yetmez -> hata, taraf A.
-        players = [make_player(f"s{i}", pos, club="Solo")
-                   for i, pos in enumerate(FORMATION_433["slots"], 1)]
-        players += [make_player(f"s{100 + i}", "CM", club="Solo") for i in range(3)]
-        setups = {"A": setup([{"type": "club", "value": "Solo"}], FORMATION_433),
-                  "B": setup(CLUB_BETA, FORMATION_433)}
-        with self.assertRaises(ValueError) as cm:
-            new_match(setups=setups, players=players + PLAYERS)
-        self.assertRegex(str(cm.exception), r"\bA\b")
-
-    def test_pool_of_exactly_fifteen_is_enough(self):
-        players = [make_player(f"s{i}", pos, club="Solo")
-                   for i, pos in enumerate(FORMATION_433["slots"], 1)]
-        players += [make_player(f"s{100 + i}", "CM", club="Solo") for i in range(4)]
-        setups = {"A": setup([{"type": "club", "value": "Solo"}], FORMATION_433),
-                  "B": setup(CLUB_BETA, FORMATION_433)}
-        state = new_match(setups=setups, players=players + PLAYERS)
-        self.assertEqual(len(all_ids(state, "A")), SQUAD_SIZE)
-        self.assertEqual(len(set(all_ids(state, "A"))), SQUAD_SIZE)
-
-    def test_no_matching_category_raises(self):
-        setups = default_setups()
-        setups["A"] = setup([{"type": "nation", "value": "Yokhayir"}], FORMATION_433)
-        with self.assertRaises(ValueError):
-            new_match(setups=setups)
-
-    def test_zero_categories_raises_with_side_A(self):
-        setups = default_setups()
-        setups["A"] = setup([], FORMATION_433)
-        with self.assertRaises(ValueError) as cm:
-            new_match(setups=setups)
-        self.assertRegex(str(cm.exception), r"\bA\b")
-
-    def test_zero_categories_raises_with_side_B(self):
-        setups = default_setups()
-        setups["B"] = setup([], FORMATION_433)
-        with self.assertRaises(ValueError) as cm:
-            new_match(setups=setups)
-        self.assertRegex(str(cm.exception), r"\bB\b")
-
-    def test_five_categories_raises_with_side(self):
-        five = [
-            {"type": "club", "value": "Alpha"},
-            {"type": "club", "value": "Beta"},
-            {"type": "league", "value": "L1"},
-            {"type": "nation", "value": "Nationa"},
-            {"type": "nation", "value": "Nationb"},
-        ]
-        for side in ("A", "B"):
-            setups = default_setups()
-            setups[side] = setup(five, FORMATION_433)
-            with self.subTest(side=side), self.assertRaises(ValueError) as cm:
-                new_match(setups=setups)
-            self.assertRegex(str(cm.exception), rf"\b{side}\b")
-
-    def test_four_categories_allowed(self):
-        four = [
-            {"type": "club", "value": "Alpha"},
-            {"type": "club", "value": "Gamma"},
-            {"type": "league", "value": "L2"},
-            {"type": "nation", "value": "Nationa"},
-        ]
-        setups = default_setups()
-        setups["A"] = setup(four, FORMATION_433)
-        state = new_match(setups=setups)
-        self.assertEqual(len(squad_ids(state, "A")), 11)
-
-    def test_each_side_has_eleven_slots_and_four_bench_players_by_default(self):
+    def test_each_side_gets_eleven_eight_bench_and_four_reserves(self):
         state = new_match()
-        self.assertEqual(BENCH_SIZE, 4)
-        for side in ("A", "B"):
-            self.assertEqual(len(state["sides"][side]["slots"]), 11)
-            self.assertEqual(len(state["sides"][side]["bench"]), BENCH_SIZE)
-            self.assertEqual(len(set(all_ids(state, side))), SQUAD_SIZE)
+        for side in SIDES:
+            s = state["sides"][side]
+            self.assertEqual(len(s["slots"]), FIRST_ELEVEN)
+            self.assertEqual(len(s["bench"]), BENCH_SIZE)
+            self.assertEqual(len(s["reserves"]), RESERVE_SIZE)
+            self.assertEqual(len(side_ids(s)), SQUAD_SIZE)
+            self.assertEqual(s["protected_ids"], [])
 
-    def test_bench_size_parameter_is_respected(self):
-        state = new_match(bench_size=2)
-        self.assertEqual(len(state["sides"]["A"]["bench"]), 2)
-        self.assertEqual(len(state["sides"]["B"]["bench"]), 2)
-
-    def test_no_player_repeats_within_or_across_sides(self):
+    def test_no_player_shared_between_sides_or_groups(self):
         state = new_match()
-        a, b = all_ids(state, "A"), all_ids(state, "B")
-        self.assertEqual(len(set(a)), SQUAD_SIZE)
-        self.assertEqual(len(set(b)), SQUAD_SIZE)
-        self.assertEqual(set(a) & set(b), set())
+        ids = side_ids(state["sides"]["A"]) + side_ids(state["sides"]["B"])
+        self.assertEqual(len(ids), 2 * SQUAD_SIZE)
+        self.assertEqual(len(set(ids)), len(ids))
 
-    def test_each_side_slots_follow_its_own_formation_order(self):
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
-        state = new_match(setups=setups)
+    def test_slot_positions_follow_formation_and_fit_player(self):
+        state = new_match()
         for side, formation in (("A", FORMATION_433), ("B", FORMATION_442)):
             slots = state["sides"][side]["slots"]
             self.assertEqual([s["pos"] for s in slots], formation["slots"])
+            for s in slots:
+                player = s["player"]
+                self.assertTrue(player["pos"] == s["pos"] or s["pos"] in player["alt"],
+                                f"{side}: {player['pos']} oyuncusu {s['pos']} slotuna uymuyor")
 
-    def test_different_formations_both_recorded_in_state(self):
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_352)}
-        state = new_match(setups=setups)
-        self.assertEqual(state["setups"]["A"]["formation_id"], "4-3-3")
-        self.assertEqual(state["setups"]["B"]["formation_id"], "3-5-2")
-        self.assertEqual(state["setups"]["A"]["categories"], CLUB_ALPHA)
-        self.assertEqual(state["setups"]["B"]["categories"], CLUB_BETA)
-
-    def test_each_side_player_comes_only_from_its_own_categories(self):
-        setups = {
-            "A": setup([{"type": "club", "value": "Alpha"}], FORMATION_433),
-            "B": setup([{"type": "club", "value": "Beta"}, {"type": "nation", "value": "Nationb"}],
-                       FORMATION_442),
-        }
-        state = new_match(setups=setups)
-        for pid in all_ids(state, "A"):
-            self.assertEqual(PLAYERS_BY_ID[pid]["club"], "Alpha")
-        for pid in all_ids(state, "B"):
-            p = PLAYERS_BY_ID[pid]
-            self.assertTrue(p["club"] == "Beta" or p["nation"] == "Nationb")
-
-    def test_overlapping_pools_player_only_on_one_side(self):
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(LEAGUE_L1, FORMATION_442)}
-        state = new_match(setups=setups)
-        self.assertEqual(set(all_ids(state, "A")) & set(all_ids(state, "B")), set())
-
-    def test_identical_pools_no_player_on_both_sides(self):
-        setups = {"A": setup(LEAGUE_L1, FORMATION_433), "B": setup(LEAGUE_L1, FORMATION_433)}
-        state = new_match(setups=setups)
-        self.assertEqual(len(set(all_ids(state, "A"))), SQUAD_SIZE)
-        self.assertEqual(len(set(all_ids(state, "B"))), SQUAD_SIZE)
-        self.assertEqual(set(all_ids(state, "A")) & set(all_ids(state, "B")), set())
-
-    def test_dealt_slot_player_fits_slot_by_pos_or_alt(self):
-        pool = [make_player(i, "LW", alt=["ST"]) for i in range(1, 41)]
-        formation = {"id": "x", "slots": ["ST"] * 11}
-        setups = {"A": setup(CLUB_ALPHA, formation), "B": setup(CLUB_ALPHA, formation)}
-        state = create_match(players=pool, setups=setups, seed=5)
-        for side in ("A", "B"):
-            for slot in state["sides"][side]["slots"]:
-                self.assertTrue(slot["player"]["pos"] == slot["pos"]
-                                or slot["pos"] in slot["player"]["alt"])
-
-    def test_initial_state_starts_unprotected_in_steal_step(self):
+    def test_initial_state_fields(self):
         state = new_match()
         self.assertEqual(state["phase"], "steal")
         self.assertEqual(state["step"], "steal")
         self.assertEqual(state["turn"], "A")
-        self.assertEqual(state["steals_left"], {"A": 3, "B": 3})
-        self.assertEqual(state["protect_count"], 3)
+        self.assertEqual(state["steals_left"], {"A": STEALS_PER_SIDE, "B": STEALS_PER_SIDE})
+        self.assertEqual(state["protect_count"], PROTECT_COUNT)
         self.assertEqual(state["arranged"], {"A": False, "B": False})
-        self.assertEqual(state["sides"]["A"]["protected_ids"], [])
-        self.assertEqual(state["sides"]["B"]["protected_ids"], [])
+        self.assertEqual(state["setups"]["A"]["formation_id"], "4-3-3")
+        self.assertEqual(state["setups"]["B"]["formation_id"], "4-4-2")
 
-    def test_same_seed_same_state_including_bench(self):
+    def test_players_come_only_from_own_categories(self):
+        state = new_match()
+        for p in side_players(state["sides"]["A"]):
+            self.assertEqual(p["club"], "Alpha")
+        for p in side_players(state["sides"]["B"]):
+            self.assertEqual(p["club"], "Beta")
+
+    def test_side_a_pool_too_small_raises(self):
+        players = make_pool("a", "Alpha", count=22) + make_pool("b", "Beta")
+        with self.assertRaises(ValueError) as cm:
+            create_match(players, two_side_setups(), seed=1)
+        self.assertRegex(str(cm.exception), r"A tarafı")
+
+    def test_side_b_pool_too_small_raises(self):
+        players = make_pool("a", "Alpha") + make_pool("b", "Beta", count=22)
+        with self.assertRaises(ValueError) as cm:
+            create_match(players, two_side_setups(), seed=1)
+        self.assertRegex(str(cm.exception), r"B tarafı")
+
+    def test_shared_pool_too_small_for_both_sides_raises(self):
+        players = make_pool("s", "Shared", count=45)
+        setups = {"A": setup("Shared", FORMATION_433), "B": setup("Shared", FORMATION_442)}
+        with self.assertRaises(ValueError):
+            create_match(players, setups, seed=1)
+
+    def test_zero_categories_raises_for_that_side(self):
+        setups = two_side_setups()
+        setups["B"]["categories"] = []
+        with self.assertRaises(ValueError) as cm:
+            create_match(base_players(), setups, seed=1)
+        self.assertRegex(str(cm.exception), r"B")
+
+    def test_five_categories_raises(self):
+        setups = two_side_setups()
+        setups["B"]["categories"] = [{"type": "club", "value": "Beta"}] + [
+            {"type": "league", "value": f"L{i}"} for i in range(4)
+        ]
+        with self.assertRaises(ValueError):
+            create_match(base_players(), setups, seed=1)
+
+    def test_four_categories_allowed(self):
+        setups = two_side_setups()
+        setups["A"]["categories"] = [
+            {"type": "club", "value": "Alpha"},
+            {"type": "league", "value": "L1"},
+            {"type": "nation", "value": "Nationa"},
+            {"type": "club", "value": "Gamma"},
+        ]
+        state = create_match(base_players(), setups, seed=1)
+        self.assertEqual(len(side_ids(state["sides"]["A"])), SQUAD_SIZE)
+
+    def test_same_seed_same_state(self):
         self.assertEqual(new_match(seed=7), new_match(seed=7))
 
-    def test_same_seed_same_state_with_different_formations(self):
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
-        self.assertEqual(new_match(setups=setups, seed=9), new_match(setups=setups, seed=9))
-
-    def test_different_seed_different_deal(self):
-        s1, s2 = new_match(seed=1), new_match(seed=2)
-        self.assertNotEqual(all_ids(s1, "A"), all_ids(s2, "A"))
+    def test_different_seed_changes_deal(self):
+        base = new_match(seed=1)
+        self.assertTrue(any(new_match(seed=s) != base for s in range(2, 8)))
 
     def test_inputs_are_not_mutated(self):
-        players = copy.deepcopy(PLAYERS)
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
+        players = base_players()
+        setups = two_side_setups()
+        players_before = copy.deepcopy(players)
         setups_before = copy.deepcopy(setups)
-        create_match(players=players, setups=setups, seed=3)
-        self.assertEqual(players, PLAYERS)
+        create_match(players, setups, seed=3)
+        self.assertEqual(players, players_before)
         self.assertEqual(setups, setups_before)
 
+    def test_bench_and_reserve_sizes_are_configurable(self):
+        state = create_match(base_players(), two_side_setups(), bench_size=5, reserve_size=2, seed=1)
+        self.assertEqual(len(state["sides"]["A"]["bench"]), 5)
+        self.assertEqual(len(state["sides"]["A"]["reserves"]), 2)
+
+
+class RealDataTests(unittest.TestCase):
+    @unittest.skipUnless(os.path.exists(PLAYERS_PATH), "data/players.json yok")
+    def test_real_clubs_deal_full_squads_for_many_seeds(self):
+        with open(PLAYERS_PATH, encoding="utf-8") as fh:
+            players = json.load(fh)
+        setups = {
+            "A": setup("Real Madrid", FORMATION_433),
+            "B": setup("Chelsea", FORMATION_442),
+        }
+        for seed in range(1, 21):
+            state = create_match(players, setups, seed=seed)
+            for side in SIDES:
+                self.assertEqual(len(side_ids(state["sides"][side])), SQUAD_SIZE)
+            ids = side_ids(state["sides"]["A"]) + side_ids(state["sides"]["B"])
+            self.assertEqual(len(set(ids)), len(ids), f"seed {seed}: aynı oyuncu iki yerde")
+
+
+# ---------------------------------------------------------------- kalite penceresi
+
+class QualityWindowTests(unittest.TestCase):
+    def test_goalkeeper_slot_gets_only_90_or_80_with_own_pools(self):
+        players = gk_pool("a", "Alpha") + gk_pool("b", "Beta")
+        for seed in range(50):
+            state = create_match(players, two_side_setups(), seed=seed)
+            for side in SIDES:
+                gk = [s["player"]["rating"] for s in state["sides"][side]["slots"]
+                      if s["pos"] == "GK"]
+                self.assertEqual(len(gk), 1)
+                self.assertIn(gk[0], (90, 80), f"seed {seed}, taraf {side}")
+
+    def test_shared_pool_gives_one_side_90_and_other_80(self):
+        players = gk_pool("s", "Shared")
+        setups = {"A": setup("Shared", FORMATION_433), "B": setup("Shared", FORMATION_442)}
+        for seed in range(20):
+            state = create_match(players, setups, seed=seed)
+            gks = sorted(
+                s["player"]["rating"]
+                for side in SIDES
+                for s in state["sides"][side]["slots"] if s["pos"] == "GK"
+            )
+            self.assertEqual(gks, [80, 90], f"seed {seed}")
+
+    def test_weak_goalkeepers_appear_without_window(self):
+        players = gk_pool("a", "Alpha") + gk_pool("b", "Beta")
+        seen = set()
+        for seed in range(50):
+            state = create_match(players, two_side_setups(), seed=seed, quality_window=None)
+            for side in SIDES:
+                for s in state["sides"][side]["slots"]:
+                    if s["pos"] == "GK":
+                        seen.add(s["player"]["rating"])
+        self.assertTrue(seen & {71, 68}, f"pencere kapalıyken 71/68 bekleniyordu: {seen}")
+
+    def test_zero_window_falls_back_to_remaining_best_for_second_side(self):
+        players = gk_pool("s", "Shared")
+        setups = {"A": setup("Shared", FORMATION_433), "B": setup("Shared", FORMATION_442)}
+        for seed in range(20):
+            state = create_match(players, setups, seed=seed, quality_window=0)
+            a_gk = [s["player"]["rating"] for s in state["sides"]["A"]["slots"] if s["pos"] == "GK"]
+            b_gk = [s["player"]["rating"] for s in state["sides"]["B"]["slots"] if s["pos"] == "GK"]
+            self.assertEqual(a_gk, [90])
+            self.assertEqual(b_gk, [80])
+
+    def test_default_quality_window_is_ten(self):
+        self.assertEqual(
+            create_match(base_players(), two_side_setups(), seed=5),
+            create_match(base_players(), two_side_setups(), seed=5,
+                         quality_window=QUALITY_WINDOW),
+        )
+
+
+# ---------------------------------------------------------------- takım puanı
+
+class TeamRatingTests(unittest.TestCase):
+    def test_nineteen_player_average_with_exact_numbers(self):
+        slots = [("ST", manual_player(f"s{i}", "ST", 80)) for i in range(FIRST_ELEVEN)]
+        bench = [manual_player(f"b{i}", "GK", 60) for i in range(BENCH_SIZE)]
+        state = manual_state(manual_side(slots, bench), manual_side(slots, bench))
+        # (11*80 + 8*60) / 19 = 71.58 -> 72. Yedekte pozisyon cezası olsaydı 67 çıkardı.
+        self.assertEqual(team_rating(state, "A"), 72)
+
+    def test_reserves_do_not_count(self):
+        slots = [("ST", manual_player(f"s{i}", "ST", 80)) for i in range(FIRST_ELEVEN)]
+        bench = [manual_player(f"b{i}", "GK", 60) for i in range(BENCH_SIZE)]
+        reserves = [manual_player(f"r{i}", "ST", 99) for i in range(RESERVE_SIZE)]
+        state = manual_state(manual_side(slots, bench, reserves), manual_side(slots, bench))
+        self.assertEqual(team_rating(state, "A"), 72)
+
+    def test_slot_mismatch_penalty_applies_to_first_eleven_only(self):
+        slots = [("ST", manual_player(f"s{i}", "ST", 80)) for i in range(10)]
+        slots.append(("ST", manual_player("gk", "GK", 80)))  # 80 - 10 = 70
+        bench = [manual_player(f"b{i}", "GK", 60) for i in range(BENCH_SIZE)]
+        state = manual_state(manual_side(slots, bench), manual_side(slots, bench))
+        # (10*80 + 70 + 8*60) / 19 = 1350 / 19 = 71.05 -> 71
+        self.assertEqual(team_rating(state, "A"), 71)
+
+    def test_rounding_is_to_integer(self):
+        slots = [("ST", manual_player(f"s{i}", "ST", 81)) for i in range(FIRST_ELEVEN)]
+        bench = [manual_player(f"b{i}", "ST", 80) for i in range(BENCH_SIZE)]
+        state = manual_state(manual_side(slots, bench), manual_side(slots, bench))
+        value = team_rating(state, "A")
+        self.assertIsInstance(value, int)
+        self.assertEqual(value, round((11 * 81 + 8 * 80) / 19))
+
+    def test_reserve_swap_keeps_rating_and_bench_swap_changes_it(self):
+        st = new_match()
+        before_a = team_rating(st, "A")
+        before_b = team_rating(st, "B")
+        # Rezerv <-> rezerv: iki tarafın ilk 11 ve yedekleri değişmez, puan sabit.
+        r = steal(st, "A", st["sides"]["B"]["reserves"][0]["id"],
+                  st["sides"]["A"]["reserves"][0]["id"])
+        self.assertEqual(team_rating(r, "A"), before_a)
+        self.assertEqual(team_rating(r, "B"), before_b)
+        # Yedek <-> yedek: puan yedeklerin ratinglerine göre yeniden hesaplanır.
+        b = steal(st, "A", st["sides"]["B"]["bench"][0]["id"], st["sides"]["A"]["bench"][0]["id"])
+        self.assertEqual(team_rating(b, "A"), expected_team(b, "A"))
+        self.assertEqual(team_rating(b, "B"), expected_team(b, "B"))
+
+    def test_bench_swap_changes_rating_when_ratings_differ(self):
+        slots = [("ST", manual_player(f"s{i}", "ST", 80)) for i in range(FIRST_ELEVEN)]
+        bench_a = [manual_player(f"a{i}", "ST", 60) for i in range(BENCH_SIZE)]
+        bench_b = [manual_player(f"c{i}", "ST", 90) for i in range(BENCH_SIZE)]
+        before = manual_state(manual_side(slots, bench_a), manual_side(slots, bench_b))
+        bench_a2 = list(bench_a)
+        bench_a2[0] = bench_b[0]
+        after = manual_state(manual_side(slots, bench_a2), manual_side(slots, bench_b))
+        self.assertNotEqual(team_rating(before, "A"), team_rating(after, "A"))
+        self.assertEqual(team_rating(after, "A"), round((11 * 80 + 7 * 60 + 90) / 19))
+
+
+# ---------------------------------------------------------------- slot_score
+
+class SlotScoreTests(unittest.TestCase):
+    def test_exact_position_gives_rating(self):
+        self.assertEqual(slot_score("ST", make_player("1", "ST", rating=85)), 85)
+
+    def test_alternate_position_gives_rating(self):
+        self.assertEqual(slot_score("LW", make_player("1", "ST", rating=85, alt=["LW"])), 85)
+
+    def test_mismatch_gives_rating_minus_ten(self):
+        self.assertEqual(slot_score("GK", make_player("1", "ST", rating=85)), 75)
+
+    def test_penalty_never_goes_below_zero(self):
+        self.assertEqual(slot_score("GK", make_player("1", "ST", rating=5)), 0)
+        self.assertEqual(slot_score("GK", make_player("1", "ST", rating=10)), 0)
+
+
+# ---------------------------------------------------------------- takas
 
 class StealTests(unittest.TestCase):
-    def test_steal_in_arrange_phase_raises(self):
-        arranging = play_out(new_match())
+    def test_steal_requires_turn(self):
+        st = new_match()
         with self.assertRaises(ValueError):
-            steal(arranging, "A", unprotected_ids(arranging, "B")[0], unprotected_ids(arranging, "A")[0])
+            steal(st, "B", st["sides"]["A"]["slots"][0]["player"]["id"],
+                  st["sides"]["B"]["slots"][0]["player"]["id"])
 
-    def test_steal_in_done_phase_raises(self):
-        done = finish_arrange(play_out(new_match()))
-        with self.assertRaises(ValueError):
-            steal(done, "A", unprotected_ids(done, "B")[0], unprotected_ids(done, "A")[0])
+    def test_slot_for_bench_across_sides(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        target = slot_ids(b)[0]
+        give = bench_ids(a)[0]
+        new = steal(st, "A", target, give)
+        na, nb = new["sides"]["A"], new["sides"]["B"]
+        self.assertEqual(na["bench"][0]["id"], target)
+        self.assertEqual(nb["slots"][0]["player"]["id"], give)
+        # Slot pozisyon etiketleri yerinde kalır.
+        self.assertEqual(nb["slots"][0]["pos"], b["slots"][0]["pos"])
+        self.assertEqual(na["slots"][0]["pos"], a["slots"][0]["pos"])
 
-    def test_second_steal_before_protect_step_raises(self):
-        state = first_steal(new_match(), "A")
-        self.assertEqual(state["step"], "protect")
-        self.assertEqual(state["turn"], "A")
-        with self.assertRaises(ValueError):
-            steal(state, "A", unprotected_ids(state, "B")[0], unprotected_ids(state, "A")[0])
+    def test_reserve_for_slot(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        target = reserve_ids(b)[1]
+        give = slot_ids(a)[2]
+        new = steal(st, "A", target, give)
+        self.assertEqual(new["sides"]["A"]["slots"][2]["player"]["id"], target)
+        self.assertEqual(new["sides"]["B"]["reserves"][1]["id"], give)
 
-    def test_wrong_turn_raises(self):
-        state = new_match()
-        with self.assertRaises(ValueError):
-            steal(state, "B", unprotected_ids(state, "A")[0], unprotected_ids(state, "B")[0])
+    def test_bench_for_reserve(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        target = bench_ids(b)[3]
+        give = reserve_ids(a)[0]
+        new = steal(st, "A", target, give)
+        self.assertEqual(new["sides"]["A"]["reserves"][0]["id"], target)
+        self.assertEqual(new["sides"]["B"]["bench"][3]["id"], give)
 
-    def test_protected_slot_target_raises(self):
-        state = first_steal(new_match(), "A")
-        state = protect(state, "A", squad_ids(state, "A")[:3])
-        protected_a = state["sides"]["A"]["protected_ids"][0]
-        with self.assertRaises(ValueError):
-            steal(state, "B", protected_a, unprotected_ids(state, "B")[0])
-
-    def test_protected_bench_target_raises(self):
-        state = first_steal(new_match(), "A")
-        bench_a = bench_ids(state, "A")[0]
-        state = protect(state, "A", [bench_a])
-        with self.assertRaises(ValueError):
-            steal(state, "B", bench_a, unprotected_ids(state, "B")[0])
-
-    def test_protected_give_raises(self):
-        state = first_steal(new_match(), "A")
-        state = protect(state, "A", squad_ids(state, "A")[:3])
-        protected_a = state["sides"]["A"]["protected_ids"][0]
-        state = steal(state, "B", unprotected_ids(state, "A")[0], unprotected_ids(state, "B")[0])
-        state = protect(state, "B", squad_ids(state, "B")[:3])
-        self.assertIn(protected_a, all_ids(state, "A"))
-        with self.assertRaises(ValueError):
-            steal(state, "A", unprotected_ids(state, "B")[0], protected_a)
-
-    def test_target_on_own_side_raises(self):
-        state = new_match()
-        with self.assertRaises(ValueError):
-            steal(state, "A", unprotected_ids(state, "A")[0], unprotected_ids(state, "A")[1])
-
-    def test_give_from_opponent_side_raises(self):
-        state = new_match()
-        with self.assertRaises(ValueError):
-            steal(state, "A", unprotected_ids(state, "B")[0], unprotected_ids(state, "B")[0])
-
-    def test_unknown_ids_raise(self):
-        state = new_match()
-        with self.assertRaises(ValueError):
-            steal(state, "A", "does-not-exist", unprotected_ids(state, "A")[0])
-        with self.assertRaises(ValueError):
-            steal(state, "A", unprotected_ids(state, "B")[0], "does-not-exist")
-
-    def test_slot_to_slot_swap_moves_players_and_keeps_slot_pos(self):
-        state = new_match()
-        target = squad_ids(state, "B")[0]
-        give = squad_ids(state, "A")[0]
-        new = steal(state, "A", target, give)
-        self.assertEqual(new["sides"]["A"]["slots"][0]["player"]["id"], target)
-        self.assertEqual(new["sides"]["B"]["slots"][0]["player"]["id"], give)
-        self.assertEqual(new["sides"]["A"]["slots"][0]["pos"], FORMATION_433["slots"][0])
-        self.assertEqual(len(set(squad_ids(new, "A"))), 11)
-        self.assertEqual(len(set(squad_ids(new, "B"))), 11)
-
-    def test_steal_rival_bench_player_for_own_slot_player(self):
-        state = new_match()
-        target = bench_ids(state, "B")[2]
-        give = squad_ids(state, "A")[4]
-        new = steal(state, "A", target, give)
-        self.assertEqual(locate(new, "A", target), ("slot", 4))
-        self.assertEqual(locate(new, "B", give), ("bench", 2))
-        self.assertEqual(new["sides"]["A"]["slots"][4]["pos"], FORMATION_433["slots"][4])
-
-    def test_steal_own_bench_player_for_rival_slot_player(self):
-        state = new_match()
-        target = squad_ids(state, "B")[7]
-        give = bench_ids(state, "A")[3]
-        new = steal(state, "A", target, give)
-        self.assertEqual(locate(new, "A", target), ("bench", 3))
-        self.assertEqual(locate(new, "B", give), ("slot", 7))
-
-    def test_bench_for_bench_swap(self):
-        state = new_match()
-        target = bench_ids(state, "B")[1]
-        give = bench_ids(state, "A")[3]
-        new = steal(state, "A", target, give)
-        self.assertEqual(locate(new, "A", target), ("bench", 3))
-        self.assertEqual(locate(new, "B", give), ("bench", 1))
-        self.assertEqual(len(all_ids(new, "A")), SQUAD_SIZE)
-        self.assertEqual(len(all_ids(new, "B")), SQUAD_SIZE)
-
-    def test_swap_with_different_formations_keeps_each_side_layout(self):
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
-        state = new_match(setups=setups)
-        target = squad_ids(state, "B")[9]
-        give = squad_ids(state, "A")[9]
-        new = steal(state, "A", target, give)
-        self.assertEqual([s["pos"] for s in new["sides"]["A"]["slots"]], FORMATION_433["slots"])
-        self.assertEqual([s["pos"] for s in new["sides"]["B"]["slots"]], FORMATION_442["slots"])
-        self.assertEqual(new["sides"]["A"]["slots"][9]["player"]["id"], target)
-        self.assertEqual(new["sides"]["B"]["slots"][9]["player"]["id"], give)
-
-    def test_steal_moves_to_protect_step_same_turn(self):
-        new = first_steal(new_match(), "A")
+    def test_stolen_player_is_not_protected_and_sets_protect_step(self):
+        st = new_match()
+        target = slot_ids(st["sides"]["B"])[0]
+        new = steal(st, "A", target, bench_ids(st["sides"]["A"])[0])
+        self.assertEqual(new["sides"]["A"]["protected_ids"], [])
+        self.assertNotIn(target, new["sides"]["A"]["protected_ids"])
         self.assertEqual(new["phase"], "steal")
         self.assertEqual(new["step"], "protect")
         self.assertEqual(new["turn"], "A")
-        self.assertEqual(new["steals_left"], {"A": 2, "B": 3})
+        self.assertEqual(new["steals_left"]["A"], STEALS_PER_SIDE - 1)
 
-    def test_steal_does_not_auto_protect_anyone(self):
-        state = new_match()
-        new = steal(state, "A", unprotected_ids(state, "B")[0], unprotected_ids(state, "A")[0])
-        self.assertEqual(new["sides"]["A"]["protected_ids"], [])
-        self.assertEqual(new["sides"]["B"]["protected_ids"], [])
+    def test_steal_target_not_in_rival_roster_raises(self):
+        st = new_match()
+        own = slot_ids(st["sides"]["A"])[0]
+        with self.assertRaises(ValueError):
+            steal(st, "A", own, bench_ids(st["sides"]["A"])[0])
 
-    def test_stolen_player_can_be_protected_in_protect_step(self):
-        state = new_match()
-        target = unprotected_ids(state, "B")[0]
-        state = steal(state, "A", target, unprotected_ids(state, "A")[0])
-        state = protect(state, "A", [target])
-        self.assertEqual(state["sides"]["A"]["protected_ids"], [target])
+    def test_give_not_in_own_roster_raises(self):
+        st = new_match()
+        foreign = slot_ids(st["sides"]["B"])[0]
+        with self.assertRaises(ValueError):
+            steal(st, "A", slot_ids(st["sides"]["B"])[1], foreign)
 
-    def test_unprotected_stolen_player_can_be_stolen_back(self):
-        state = new_match()
-        target = unprotected_ids(state, "B")[0]
-        state = steal(state, "A", target, unprotected_ids(state, "A")[0])
-        self.assertIn(target, all_ids(state, "A"))
-        # Yeni alınan oyuncu korunmadı -> rakip (B) geri alabilir.
-        state = protect(state, "A", squad_ids(state, "A")[1:4])
-        self.assertNotIn(target, state["sides"]["A"]["protected_ids"])
-        new = steal(state, "B", target, unprotected_ids(state, "B")[0])
-        self.assertIn(target, all_ids(new, "B"))
+    def test_protected_target_cannot_be_stolen(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        st = steal(st, "A", slot_ids(b)[0], bench_ids(a)[0])
+        st = protect(st, "A", [slot_ids(a)[0]])
+        with self.assertRaises(ValueError):
+            steal(st, "B", slot_ids(a)[0], slot_ids(b)[1])
+
+    def test_protected_give_cannot_be_given(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        st = steal(st, "A", slot_ids(b)[0], bench_ids(a)[0])
+        st = protect(st, "A", [reserve_ids(a)[0]])
+        st = steal(st, "B", slot_ids(a)[0], slot_ids(b)[1])
+        st = protect(st, "B", [])
+        with self.assertRaises(ValueError):
+            steal(st, "A", slot_ids(st["sides"]["B"])[1], reserve_ids(a)[0])
+
+    def test_steal_during_protect_step_raises(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        st = steal(st, "A", slot_ids(b)[0], bench_ids(a)[0])
+        self.assertEqual(st["step"], "protect")
+        with self.assertRaises(ValueError):
+            steal(st, "A", slot_ids(b)[1], slot_ids(a)[1])
 
     def test_steal_does_not_mutate_input(self):
-        state = new_match()
-        before = copy.deepcopy(state)
-        steal(state, "A", unprotected_ids(state, "B")[0], unprotected_ids(state, "A")[0])
-        self.assertEqual(state, before)
+        st = new_match()
+        before = copy.deepcopy(st)
+        steal(st, "A", slot_ids(st["sides"]["B"])[0], bench_ids(st["sides"]["A"])[0])
+        self.assertEqual(st, before)
 
+    def test_stealing_from_exhausted_side_raises(self):
+        st = new_match()
+        st["steals_left"]["A"] = 0
+        with self.assertRaises(ValueError):
+            steal(st, "A", slot_ids(st["sides"]["B"])[0], slot_ids(st["sides"]["A"])[0])
+
+
+# ---------------------------------------------------------------- koruma
 
 class ProtectTests(unittest.TestCase):
-    def test_protect_in_steal_step_raises(self):
-        state = new_match()
+    def after_first_steal(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        return steal(st, "A", slot_ids(b)[0], bench_ids(a)[0])
+
+    def test_protect_accepts_three_from_any_group(self):
+        st = self.after_first_steal()
+        a = st["sides"]["A"]
+        ids = [slot_ids(a)[0], bench_ids(a)[0], reserve_ids(a)[0]]
+        new = protect(st, "A", ids)
+        self.assertEqual(new["sides"]["A"]["protected_ids"], ids)
+        self.assertEqual(new["turn"], "B")
+        self.assertEqual(new["step"], "steal")
+
+    def test_protect_rejects_more_than_protect_count(self):
+        st = self.after_first_steal()
+        ids = side_ids(st["sides"]["A"])[:PROTECT_COUNT + 1]
         with self.assertRaises(ValueError):
-            protect(state, "A", squad_ids(state, "A")[:3])
+            protect(st, "A", ids)
 
-    def test_protect_wrong_turn_raises(self):
-        state = first_steal(new_match(), "A")
+    def test_protect_rejects_duplicates(self):
+        st = self.after_first_steal()
+        pid = slot_ids(st["sides"]["A"])[0]
         with self.assertRaises(ValueError):
-            protect(state, "B", squad_ids(state, "B")[:3])
+            protect(st, "A", [pid, pid])
 
-    def test_more_than_three_raises(self):
-        state = first_steal(new_match(), "A")
+    def test_protect_rejects_foreign_player(self):
+        st = self.after_first_steal()
         with self.assertRaises(ValueError):
-            protect(state, "A", all_ids(state, "A")[:4])
+            protect(st, "A", [slot_ids(st["sides"]["B"])[0]])
 
-    def test_duplicate_ids_raise(self):
-        state = first_steal(new_match(), "A")
-        pid = squad_ids(state, "A")[0]
+    def test_protect_outside_protect_step_raises(self):
         with self.assertRaises(ValueError):
-            protect(state, "A", [pid, pid])
+            protect(new_match(), "A", [])
 
-    def test_id_from_other_side_raises(self):
-        state = first_steal(new_match(), "A")
+    def test_protect_by_wrong_side_raises(self):
+        st = self.after_first_steal()
         with self.assertRaises(ValueError):
-            protect(state, "A", [squad_ids(state, "B")[0]])
+            protect(st, "B", [])
 
-    def test_bench_player_can_be_protected(self):
-        state = first_steal(new_match(), "A")
-        bench_a = bench_ids(state, "A")[3]
-        state = protect(state, "A", [bench_a, squad_ids(state, "A")[0]])
-        self.assertEqual(state["sides"]["A"]["protected_ids"], [bench_a, squad_ids(state, "A")[0]])
+    def test_new_protect_list_replaces_previous(self):
+        st = self.after_first_steal()
+        a = st["sides"]["A"]
+        first_three = slot_ids(a)[:3]
+        st = protect(st, "A", first_three)
+        st = steal(st, "B", unprotected_ids(st["sides"]["A"])[0], slot_ids(st["sides"]["B"])[0])
+        st = protect(st, "B", [])
+        st = steal(st, "A", unprotected_ids(st["sides"]["B"])[0],
+                   unprotected_ids(st["sides"]["A"])[0])
+        new_list = [bench_ids(st["sides"]["A"])[0]]
+        st = protect(st, "A", new_list)
+        self.assertEqual(st["sides"]["A"]["protected_ids"], new_list)
+        self.assertNotEqual(st["sides"]["A"]["protected_ids"], first_three)
 
-    def test_all_fifteen_are_eligible_but_at_most_three_protected(self):
-        state = first_steal(new_match(), "A")
-        for pid in all_ids(state, "A"):
-            with self.subTest(pid=pid):
-                protected = protect(state, "A", [pid])
-                self.assertEqual(protected["sides"]["A"]["protected_ids"], [pid])
+    def test_empty_protect_list_is_allowed(self):
+        st = self.after_first_steal()
+        new = protect(st, "A", [])
+        self.assertEqual(new["sides"]["A"]["protected_ids"], [])
 
-    def test_empty_list_is_allowed(self):
-        state = first_steal(new_match(), "A")
-        state = protect(state, "A", [])
-        self.assertEqual(state["sides"]["A"]["protected_ids"], [])
+    def test_protected_player_can_be_moved_by_swaps(self):
+        st = self.after_first_steal()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        st = protect(st, "A", [slot_ids(a)[0]])
+        st = steal(st, "B", bench_ids(st["sides"]["A"])[1], slot_ids(b)[1])
+        st = protect(st, "B", [])
+        moved = swap_bench(st, "A", 0, 0)
+        self.assertEqual(moved["sides"]["A"]["protected_ids"], [slot_ids(a)[0]])
+        self.assertEqual(bench_ids(moved["sides"]["A"])[0], slot_ids(a)[0])
 
-    def test_fewer_than_three_is_allowed(self):
-        state = first_steal(new_match(), "A")
-        state = protect(state, "A", squad_ids(state, "A")[:2])
-        self.assertEqual(len(state["sides"]["A"]["protected_ids"]), 2)
 
-    def test_protect_replaces_previous_protection(self):
-        state = first_steal(new_match(), "A")
-        state = protect(state, "A", squad_ids(state, "A")[:3])
-        state = steal(state, "B", unprotected_ids(state, "A")[0], unprotected_ids(state, "B")[0])
-        state = protect(state, "B", squad_ids(state, "B")[:3])
-        state = steal(state, "A", unprotected_ids(state, "B")[0], unprotected_ids(state, "A")[0])
-        new_ids = bench_ids(state, "A")[:2]
-        state = protect(state, "A", new_ids)
-        self.assertEqual(state["sides"]["A"]["protected_ids"], new_ids)
+# ---------------------------------------------------------------- yerleştirme
 
-    def test_protect_advances_turn_and_step(self):
-        state = first_steal(new_match(), "A")
-        state = protect(state, "A", squad_ids(state, "A")[:3])
-        self.assertEqual(state["turn"], "B")
-        self.assertEqual(state["step"], "steal")
+class SwapTests(unittest.TestCase):
+    def test_swap_bench_exchanges_slot_and_bench(self):
+        st = new_match()
+        a = st["sides"]["A"]
+        slot_pid, bench_pid = slot_ids(a)[2], bench_ids(a)[5]
+        new = swap_bench(st, "A", 2, 5)
+        na = new["sides"]["A"]
+        self.assertEqual(na["slots"][2]["player"]["id"], bench_pid)
+        self.assertEqual(na["bench"][5]["id"], slot_pid)
+        self.assertEqual(na["slots"][2]["pos"], a["slots"][2]["pos"])
+        self.assertEqual(reserve_ids(na), reserve_ids(a))
 
-    def test_protect_does_not_mutate_input(self):
-        state = first_steal(new_match(), "A")
-        before = copy.deepcopy(state)
-        protect(state, "A", squad_ids(state, "A")[:3])
-        self.assertEqual(state, before)
+    def test_swap_bench_index_out_of_range_raises(self):
+        st = new_match()
+        for slot_index, bench_index in ((11, 0), (0, BENCH_SIZE), (-1, 0), (0, -1)):
+            with self.subTest(slot_index=slot_index, bench_index=bench_index):
+                with self.assertRaises(ValueError):
+                    swap_bench(st, "A", slot_index, bench_index)
 
-    def test_protect_in_arrange_phase_raises(self):
-        arranging = play_out(new_match())
+    def test_swap_bench_wrong_turn_in_steal_raises(self):
         with self.assertRaises(ValueError):
-            protect(arranging, "A", squad_ids(arranging, "A")[:3])
+            swap_bench(new_match(), "B", 0, 0)
 
+    def test_swap_reserve_exchanges_bench_and_reserve(self):
+        st = new_match()
+        a = st["sides"]["A"]
+        bench_pid, reserve_pid = bench_ids(a)[3], reserve_ids(a)[1]
+        new = swap_reserve(st, "A", 3, 1)
+        na = new["sides"]["A"]
+        self.assertEqual(na["bench"][3]["id"], reserve_pid)
+        self.assertEqual(na["reserves"][1]["id"], bench_pid)
+        self.assertEqual(slot_ids(na), slot_ids(a))
 
-class TurnFlowTests(unittest.TestCase):
-    def test_last_steal_moves_to_arrange_without_protect_step(self):
-        state = play_out(new_match())
-        self.assertEqual(state["phase"], "arrange")
-        self.assertEqual(state["steals_left"], {"A": 0, "B": 0})
-        self.assertEqual(state["arranged"], {"A": False, "B": False})
+    def test_swap_reserve_index_out_of_range_raises(self):
+        st = new_match()
+        for bench_index, reserve_index in ((BENCH_SIZE, 0), (0, RESERVE_SIZE), (-1, 0), (0, -1)):
+            with self.subTest(bench_index=bench_index, reserve_index=reserve_index):
+                with self.assertRaises(ValueError):
+                    swap_reserve(st, "A", bench_index, reserve_index)
 
-    def test_six_steals_end_in_arrange_and_further_steal_raises(self):
-        state = new_match()
-        steals = 0
-        while state["phase"] == "steal":
-            state = first_steal(state)
-            steals += 1
-            if state["phase"] == "steal":
-                state = protect(state, state["turn"], [])
-                # protect sonrası sıra değişti; takas yapan taraf bir önceki turdu
-        self.assertEqual(steals, 6)
-        self.assertEqual(state["phase"], "arrange")
+    def test_swap_reserve_wrong_turn_in_steal_raises(self):
         with self.assertRaises(ValueError):
-            steal(state, "A", unprotected_ids(state, "B")[0], unprotected_ids(state, "A")[0])
+            swap_reserve(new_match(), "B", 0, 0)
 
-    def test_turns_alternate_between_sides(self):
-        state = new_match()
-        turns = []
-        while state["phase"] == "steal":
-            turns.append(state["turn"])
-            state = steal_and_protect(state)
-        self.assertEqual(turns, ["A", "B", "A", "B", "A", "B"])
+    def test_swap_bench_does_not_touch_reserves(self):
+        st = new_match()
+        new = swap_bench(st, "A", 0, 0)
+        self.assertEqual(reserve_ids(new["sides"]["A"]), reserve_ids(st["sides"]["A"]))
 
+    def test_protected_reserve_can_be_swapped_and_keeps_protection(self):
+        st = new_match()
+        a, b = st["sides"]["A"], st["sides"]["B"]
+        st = steal(st, "A", slot_ids(b)[0], bench_ids(a)[0])
+        st = protect(st, "A", [reserve_ids(a)[0]])
+        st = steal(st, "B", unprotected_ids(st["sides"]["A"])[0], slot_ids(b)[1])
+        st = protect(st, "B", [])
+        new = swap_reserve(st, "A", 0, 0)
+        self.assertEqual(new["sides"]["A"]["bench"][0]["id"], reserve_ids(a)[0])
+        self.assertEqual(new["sides"]["A"]["protected_ids"], [reserve_ids(a)[0]])
 
-class SwapBenchTests(unittest.TestCase):
-    def test_swap_exchanges_slot_and_bench_players(self):
-        state = first_steal(new_match(), "A")
-        slot_pid = squad_ids(state, "A")[5]
-        bench_pid = bench_ids(state, "A")[2]
-        new = swap_bench(state, "A", 5, 2)
-        self.assertEqual(new["sides"]["A"]["slots"][5]["player"]["id"], bench_pid)
-        self.assertEqual(new["sides"]["A"]["bench"][2]["id"], slot_pid)
-
-    def test_swap_keeps_slot_positions_and_side_membership(self):
-        state = first_steal(new_match(), "A")
-        new = swap_bench(state, "A", 0, 0)
-        self.assertEqual([s["pos"] for s in new["sides"]["A"]["slots"]], FORMATION_433["slots"])
-        self.assertEqual(set(all_ids(new, "A")), set(all_ids(state, "A")))
-        self.assertEqual(set(all_ids(new, "B")), set(all_ids(state, "B")))
-
-    def test_protected_player_can_be_swapped_out_to_bench(self):
-        state = first_steal(new_match(), "A")
-        protected_pid = squad_ids(state, "A")[0]
-        state = protect(state, "A", [protected_pid])
-        # Sıra B'de; A'nın yerleşimi yalnızca kendi sırasında yapılır.
-        state = steal(state, "B", unprotected_ids(state, "A")[0], unprotected_ids(state, "B")[0])
-        state = protect(state, "B", [])
-        state = first_steal(state, "A")
-        new = swap_bench(state, "A", 0, 0)
-        self.assertIn(protected_pid, bench_ids(new, "A"))
-
-    def test_swap_allowed_during_steal_step_of_own_turn(self):
-        state = new_match()
-        self.assertEqual(state["step"], "steal")
-        new = swap_bench(state, "A", 3, 3)
-        self.assertEqual(new["sides"]["A"]["slots"][3]["player"]["id"], bench_ids(state, "A")[3])
-
-    def test_swap_allowed_during_protect_step_of_own_turn(self):
-        state = first_steal(new_match(), "A")
-        self.assertEqual(state["step"], "protect")
-        new = swap_bench(state, "A", 1, 1)
-        self.assertEqual(new["sides"]["A"]["slots"][1]["player"]["id"], bench_ids(state, "A")[1])
-
-    def test_swap_on_other_side_during_steal_phase_raises(self):
-        state = new_match()
+    def test_arrange_allows_swaps_until_side_confirms(self):
+        st = play_until_arrange(new_match(steals_per_side=1))
+        self.assertEqual(st["phase"], "arrange")
+        st = swap_reserve(st, "A", 0, 0)
+        st = swap_reserve(st, "B", 1, 1)
+        st = confirm_arrange(st, "A")
         with self.assertRaises(ValueError):
-            swap_bench(state, "B", 0, 0)
-
-    def test_swap_for_other_side_during_protect_step_raises(self):
-        state = first_steal(new_match(), "A")
+            swap_reserve(st, "A", 0, 0)
         with self.assertRaises(ValueError):
-            swap_bench(state, "B", 0, 0)
-
-    def test_slot_index_out_of_range_raises(self):
-        state = new_match()
-        with self.assertRaises(ValueError):
-            swap_bench(state, "A", 11, 0)
-
-    def test_bench_index_out_of_range_raises(self):
-        state = new_match()
-        with self.assertRaises(ValueError):
-            swap_bench(state, "A", 0, BENCH_SIZE)
-
-    def test_swap_does_not_mutate_input(self):
-        state = new_match()
-        before = copy.deepcopy(state)
-        swap_bench(state, "A", 2, 2)
-        self.assertEqual(state, before)
-
-    def test_swap_does_not_change_phase_or_turn(self):
-        state = new_match()
-        new = swap_bench(state, "A", 0, 0)
-        self.assertEqual(new["phase"], "steal")
-        self.assertEqual(new["turn"], "A")
-        self.assertEqual(new["steals_left"], state["steals_left"])
+            swap_bench(st, "A", 0, 0)
+        b_slot, b_bench = st["sides"]["B"]["slots"][0]["player"]["id"], st["sides"]["B"]["bench"][0]["id"]
+        st = swap_bench(st, "B", 0, 0)
+        self.assertEqual(st["sides"]["B"]["slots"][0]["player"]["id"], b_bench)
+        self.assertEqual(st["sides"]["B"]["bench"][0]["id"], b_slot)
 
 
-class ArrangeTests(unittest.TestCase):
-    def test_last_steal_starts_arrange_and_both_sides_confirm_to_done(self):
-        arranging = play_out(new_match())
-        self.assertEqual(arranging["phase"], "arrange")
-        once = confirm_arrange(arranging, "A")
-        self.assertEqual(once["arranged"], {"A": True, "B": False})
-        self.assertEqual(once["phase"], "arrange")
-        twice = confirm_arrange(once, "B")
-        self.assertEqual(twice["arranged"], {"A": True, "B": True})
-        self.assertEqual(twice["phase"], "done")
+# ---------------------------------------------------------------- akış, düzen, sonuç
 
-    def test_order_of_confirmation_does_not_matter(self):
-        arranging = play_out(new_match())
-        state = confirm_arrange(arranging, "B")
-        self.assertEqual(state["phase"], "arrange")
-        state = confirm_arrange(state, "A")
-        self.assertEqual(state["phase"], "done")
+class MatchFlowTests(unittest.TestCase):
+    def test_full_steal_sequence_ends_in_arrange(self):
+        st = play_until_arrange(new_match())
+        self.assertEqual(st["phase"], "arrange")
+        self.assertEqual(st["steals_left"], {"A": 0, "B": 0})
 
-    def test_arrangement_swaps_are_allowed_until_side_confirms(self):
-        arranging = play_out(new_match())
-        a_swapped = swap_bench(arranging, "A", 4, 3)
-        a_ready = confirm_arrange(a_swapped, "A")
-        b_swapped = swap_bench(a_ready, "B", 9, 2)
-        self.assertEqual(b_swapped["sides"]["B"]["slots"][9]["player"]["id"],
-                         bench_ids(a_ready, "B")[2])
-        done = confirm_arrange(b_swapped, "B")
-        self.assertEqual(done["phase"], "done")
-        self.assertEqual(done["sides"]["A"]["slots"][4]["player"]["id"],
-                         bench_ids(arranging, "A")[3])
+    def test_last_steal_goes_to_arrange_without_protect_step(self):
+        st = new_match()
+        for _ in range(2 * STEALS_PER_SIDE - 1):
+            st = play_round(st)
+        self.assertEqual(st["phase"], "steal")
+        self.assertEqual(st["step"], "steal")
+        turn = st["turn"]
+        last = steal(st, turn, unprotected_ids(st["sides"][OTHER[turn]])[0],
+                     unprotected_ids(st["sides"][turn])[0])
+        self.assertEqual(last["phase"], "arrange")
+        self.assertEqual(last["arranged"], {"A": False, "B": False})
 
-    def test_swap_after_own_confirm_raises(self):
-        arranging = confirm_arrange(play_out(new_match()), "A")
-        with self.assertRaises(ValueError):
-            swap_bench(arranging, "A", 0, 0)
-        # Karşı taraf hâlâ düzenleyebilir.
-        self.assertEqual(swap_bench(arranging, "B", 0, 0)["phase"], "arrange")
+    def test_confirm_a_then_b_finishes(self):
+        st = play_until_arrange(new_match(steals_per_side=1))
+        st = confirm_arrange(st, "A")
+        self.assertEqual(st["phase"], "arrange")
+        st = confirm_arrange(st, "B")
+        self.assertEqual(st["phase"], "done")
 
-    def test_confirm_twice_raises(self):
-        arranging = confirm_arrange(play_out(new_match()), "A")
-        with self.assertRaises(ValueError):
-            confirm_arrange(arranging, "A")
-
-    def test_confirm_during_steal_phase_raises(self):
+    def test_confirm_outside_arrange_raises(self):
         with self.assertRaises(ValueError):
             confirm_arrange(new_match(), "A")
 
-    def test_confirm_in_done_phase_raises(self):
-        done = finish_arrange(play_out(new_match()))
+    def test_confirm_twice_raises(self):
+        st = play_until_arrange(new_match(steals_per_side=1))
+        st = confirm_arrange(st, "A")
         with self.assertRaises(ValueError):
-            confirm_arrange(done, "A")
+            confirm_arrange(st, "A")
 
-    def test_confirm_invalid_side_raises(self):
-        with self.assertRaises(ValueError):
-            confirm_arrange(play_out(new_match()), "C")
+    def test_zero_steals_starts_in_arrange(self):
+        st = new_match(steals_per_side=0)
+        self.assertEqual(st["phase"], "arrange")
+        st, steals = play_full_match(st)
+        self.assertEqual(steals, 0)
+        self.assertEqual(st["phase"], "done")
 
-    def test_protect_and_steal_are_closed_in_arrange(self):
-        arranging = play_out(new_match())
-        with self.assertRaises(ValueError):
-            steal(arranging, "A", unprotected_ids(arranging, "B")[0], unprotected_ids(arranging, "A")[0])
-        with self.assertRaises(ValueError):
-            protect(arranging, "A", [])
-
-    def test_does_not_mutate_input(self):
-        arranging = play_out(new_match())
-        before = copy.deepcopy(arranging)
-        confirm_arrange(arranging, "A")
-        swap_bench(arranging, "B", 0, 0)
-        self.assertEqual(arranging, before)
-
-
-class SlotScoreTests(unittest.TestCase):
-    def test_exact_pos_gives_rating(self):
-        self.assertEqual(slot_score("ST", make_player(1, "ST", rating=80)), 80)
-
-    def test_alt_pos_gives_rating(self):
-        self.assertEqual(slot_score("ST", make_player(1, "LW", alt=["ST"], rating=80)), 80)
-
-    def test_other_pos_gives_rating_minus_ten(self):
-        self.assertEqual(slot_score("GK", make_player(1, "ST", rating=80)), 70)
-
-    def test_penalty_never_below_zero(self):
-        self.assertEqual(slot_score("GK", make_player(1, "ST", rating=5)), 0)
-
-
-class TeamRatingAndResultTests(unittest.TestCase):
-    def test_team_rating_is_rounded_mean_of_own_slot_scores(self):
-        state = play_out(new_match())
-        for side in ("A", "B"):
-            self.assertEqual(team_rating(state, side), team_rating_from_slots(state, side))
-
-    def test_team_rating_ignores_bench_players(self):
-        state = play_out(new_match())
-        changed = copy.deepcopy(state)
-        for side in ("A", "B"):
-            for player in changed["sides"][side]["bench"]:
-                player["rating"] = 99
-        for side in ("A", "B"):
-            self.assertEqual(team_rating(changed, side), team_rating(state, side))
-
-    def test_team_rating_reflects_slot_player_after_bench_swap(self):
-        state = play_out(new_match())
-        # Yedek, ilk 11'in 0. slotuna (GK) geçince puana o oyuncunun slot puanı yansır.
-        state["sides"]["A"]["bench"][0]["rating"] = 99
-        state["sides"]["A"]["bench"][0]["pos"] = "GK"
-        swapped = swap_bench(state, "A", 0, 0)
-        self.assertEqual(slot_score("GK", swapped["sides"]["A"]["slots"][0]["player"]), 99)
-        self.assertEqual(team_rating(swapped, "A"), team_rating_from_slots(swapped, "A"))
-
-    def test_result_requires_done_phase(self):
-        with self.assertRaises(ValueError):
-            result(play_out(new_match()))
+    def test_result_requires_done(self):
         with self.assertRaises(ValueError):
             result(new_match())
 
-    def test_result_matches_final_ratings_and_winner(self):
-        state = finish_arrange(play_out(new_match()))
-        res = result(state)
-        a = team_rating(state, "A")
-        b = team_rating(state, "B")
-        self.assertEqual(res["A"], a)
-        self.assertEqual(res["B"], b)
-        expected = "A" if a > b else "B" if b > a else "draw"
-        self.assertEqual(res["winner"], expected)
+    def test_result_values_match_team_rating_and_winner(self):
+        st, _ = play_full_match(new_match())
+        res = result(st)
+        self.assertEqual(res["A"], team_rating(st, "A"))
+        self.assertEqual(res["B"], team_rating(st, "B"))
+        if res["A"] > res["B"]:
+            self.assertEqual(res["winner"], "A")
+        elif res["B"] > res["A"]:
+            self.assertEqual(res["winner"], "B")
+        else:
+            self.assertEqual(res["winner"], "draw")
 
+    def test_result_draw_on_equal_ratings(self):
+        slots = [("ST", manual_player(f"s{i}", "ST", 80)) for i in range(FIRST_ELEVEN)]
+        bench = [manual_player(f"b{i}", "ST", 70) for i in range(BENCH_SIZE)]
+        side = manual_side(slots, bench)
+        res = result(manual_state(side, copy.deepcopy(side)))
+        self.assertEqual(res["winner"], "draw")
+        self.assertEqual(res["A"], res["B"])
 
-class DeterminismTests(unittest.TestCase):
-    def play(self, seed):
-        state = new_match(seed=seed)
-        state = first_steal(state, "A")
-        state = protect(state, "A", squad_ids(state, "A")[:3])
-        state = swap_bench(state, "B", 2, 1)
-        state = steal(state, "B", unprotected_ids(state, "A")[0], unprotected_ids(state, "B")[0])
-        state = protect(state, "B", [])
-        state = play_out(state)
-        state = swap_bench(state, "A", 1, 3)
-        return finish_arrange(state)
+    def test_result_winner_on_higher_rating(self):
+        strong = manual_side([("ST", manual_player(f"s{i}", "ST", 85)) for i in range(FIRST_ELEVEN)],
+                             [manual_player(f"b{i}", "ST", 85) for i in range(BENCH_SIZE)])
+        weak = manual_side([("ST", manual_player(f"w{i}", "ST", 60)) for i in range(FIRST_ELEVEN)],
+                           [manual_player(f"v{i}", "ST", 60) for i in range(BENCH_SIZE)])
+        res = result(manual_state(weak, strong))
+        self.assertEqual(res["winner"], "B")
 
-    def test_same_seed_and_moves_give_same_state_and_result(self):
-        first, second = self.play(seed=11), self.play(seed=11)
+    def test_full_match_is_deterministic(self):
+        first, steals1 = play_full_match(new_match(seed=11))
+        second, steals2 = play_full_match(new_match(seed=11))
+        self.assertEqual(steals1, STEALS_PER_SIDE * 2)
+        self.assertEqual(steals2, steals1)
         self.assertEqual(first, second)
         self.assertEqual(result(first), result(second))
 
-    def test_same_seed_and_moves_with_different_formations(self):
-        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_352)}
-
-        def run():
-            state = new_match(setups=setups, seed=4)
-            state = play_out(state)
-            return finish_arrange(swap_bench(state, "A", 0, 0))
-
-        self.assertEqual(run(), run())
-
-
-class RealDataEndToEndTests(unittest.TestCase):
-    """Gerçek data/*.json ile tam maç: farklı kategori + formasyon, 15 oyuncu, 6 takas, arrange."""
-
-    @classmethod
-    def setUpClass(cls):
-        def load(name):
-            with open(os.path.join(ROOT, "data", name), encoding="utf-8") as fh:
-                return json.load(fh)
-
-        cls.players = load("players.json")
-        cls.formations = load("formations.json")
-
-    def formation(self, fid):
-        return next(f for f in self.formations if f["id"] == fid)
-
-    def build(self, seed=1):
-        setups = {
-            "A": setup([{"type": "nation", "value": "England"}], self.formation("4-3-3")),
-            "B": setup([{"type": "league", "value": "Premier League"}], self.formation("4-4-2")),
-        }
-        return create_match(players=self.players, setups=setups,
-                            protect_count=3, steals_per_side=3, bench_size=BENCH_SIZE, seed=seed)
-
-    def test_real_data_deal_respects_categories_and_disjointness(self):
-        state = self.build()
-        by_id = {p["id"]: p for p in self.players}
-        for pid in all_ids(state, "A"):
-            self.assertEqual(by_id[pid]["nation"], "England")
-        for pid in all_ids(state, "B"):
-            self.assertEqual(by_id[pid]["league"], "Premier League")
-        self.assertEqual(len(bench_ids(state, "A")), BENCH_SIZE)
-        self.assertEqual(len(bench_ids(state, "B")), BENCH_SIZE)
-        self.assertEqual(set(all_ids(state, "A")) & set(all_ids(state, "B")), set())
-        self.assertEqual([s["pos"] for s in state["sides"]["B"]["slots"]],
-                         self.formation("4-4-2")["slots"])
-        self.assertEqual(state["phase"], "steal")
-        self.assertEqual(state["step"], "steal")
-
-    def test_full_match_with_six_steals_arrange_and_result(self):
-        state = self.build()
-        steals = 0
-        while state["phase"] == "steal":
-            side = state["turn"]
-            before = {s: set(all_ids(state, s)) for s in ("A", "B")}
-            state = first_steal(state, side)
-            steals += 1
-            after = {s: set(all_ids(state, s)) for s in ("A", "B")}
-            # Her takasta iki taraf da 15 oyuncuyu korur ve iki oyuncu el değiştirir.
-            self.assertEqual(len(after["A"]), SQUAD_SIZE)
-            self.assertEqual(len(after["B"]), SQUAD_SIZE)
-            self.assertEqual(len(before["A"] ^ after["A"]), 2)
-            self.assertEqual(len(before["B"] ^ after["B"]), 2)
-            if state["phase"] == "steal":
-                self.assertEqual(state["step"], "protect")
-                state = protect(state, side, squad_ids(state, side)[:3])
-
-        self.assertEqual(steals, 6)
-        self.assertEqual(state["phase"], "arrange")
-        for side in ("A", "B"):
-            self.assertEqual(len(set(all_ids(state, side))), SQUAD_SIZE)
-            self.assertLessEqual(len(state["sides"][side]["protected_ids"]), 3)
-            self.assertTrue(set(state["sides"][side]["protected_ids"]) <= set(all_ids(state, side)))
-        self.assertEqual(set(all_ids(state, "A")) & set(all_ids(state, "B")), set())
-
-        state = finish_arrange(state)
-        self.assertEqual(state["phase"], "done")
-        res = result(state)
-        self.assertIn(res["winner"], ("A", "B", "draw"))
-        self.assertEqual(res["A"], team_rating(state, "A"))
-        self.assertEqual(res["B"], team_rating(state, "B"))
-
-
-class QualityWindowTests(unittest.TestCase):
-    """Güncelleme 5: dağıtım kaliteye duyarlıdır (quality_window, varsayılan 10)."""
-
-    SEEDS = range(1, 51)
-
-    @classmethod
-    def setUpClass(cls):
-        # Sentetik havuz: A tarafında kaleciler 90, 80, 71, 68; diğerleri 75 puanlı saha oyuncuları
-        # (4-3-3 için 10 saha slotu + 4 ek CM = 14; toplam 18 >= 15).
-        gks = [make_player(f"gk{r}", "GK", club="Solo", rating=r) for r in (90, 80, 71, 68)]
-        field_positions = FORMATION_433["slots"][1:] + ["CM"] * 4
-        field = [make_player(f"o{i}", pos, club="Solo", rating=75)
-                 for i, pos in enumerate(field_positions)]
-        cls.solo_players = gks + field
-        cls.synthetic = cls.solo_players + PLAYERS
-        cls.solo_categories = [{"type": "club", "value": "Solo"}]
-
-    def synthetic_match(self, seed, **overrides):
-        setups = {"A": setup(self.solo_categories, FORMATION_433),
-                  "B": setup(CLUB_BETA, FORMATION_433)}
-        kwargs = dict(players=self.synthetic, setups=setups, seed=seed)
-        kwargs.update(overrides)
-        return create_match(**kwargs)
-
-    def test_gk_slot_never_gets_71_or_68_when_90_and_80_available(self):
-        for seed in self.SEEDS:
-            with self.subTest(seed=seed):
-                state = self.synthetic_match(seed)
-                gk = state["sides"]["A"]["slots"][0]
-                self.assertEqual(gk["pos"], "GK")
-                self.assertIn(gk["player"]["rating"], (90, 80))
-
-    def test_quality_window_none_allows_gk_71_or_68(self):
-        # Eski tam rastgele davranış: pencere dışı kaleci slota gelebilir.
-        ratings = {self.synthetic_match(seed, quality_window=None)["sides"]["A"]["slots"][0]
-                   ["player"]["rating"] for seed in self.SEEDS}
-        self.assertTrue(ratings & {71, 68}, f"gk slot ratings: {sorted(ratings)}")
-
-    def test_synthetic_pool_invariant_holds_for_both_sides(self):
-        pool_a = pool_for(self.synthetic, self.solo_categories)
-        pool_b = pool_for(self.synthetic, CLUB_BETA)
-        for seed in self.SEEDS:
-            with self.subTest(seed=seed):
-                state = self.synthetic_match(seed)
-                assert_quality_window(self, state, "A", pool_a)
-                assert_quality_window(self, state, "B", pool_b)
-
-    def test_window_zero_invariant_holds(self):
-        pool_a = pool_for(self.synthetic, self.solo_categories)
-        for seed in range(1, 21):
-            with self.subTest(seed=seed):
-                state = self.synthetic_match(seed, quality_window=0)
-                assert_quality_window(self, state, "A", pool_a, window=0)
-
-    def test_default_window_is_ten(self):
-        self.assertEqual(self.synthetic_match(3), self.synthetic_match(3, quality_window=QUALITY_WINDOW))
-
-    def test_deterministic_with_window(self):
-        self.assertEqual(self.synthetic_match(8), self.synthetic_match(8))
-        self.assertEqual(self.synthetic_match(8, quality_window=None),
-                         self.synthetic_match(8, quality_window=None))
-
-
-class RealClubQualityTests(unittest.TestCase):
-    """Gerçek veri: Real Madrid (A, 4-3-3) ve Gençlerbirliği (B, 4-2-3-1), 100 seed.
-    Not: 4-4-2 gibi ST'si yetersiz formasyonlar Gençlerbirliği için bu havuzda tıkanır; bu yüzden
-    B için 4-2-3-1 seçildi."""
-
-    @classmethod
-    def setUpClass(cls):
-        def load(name):
-            with open(os.path.join(ROOT, "data", name), encoding="utf-8") as fh:
-                return json.load(fh)
-
-        cls.players = load("players.json")
-        formations = load("formations.json")
-        cls.f433 = next(f for f in formations if f["id"] == "4-3-3")
-        cls.f4231 = next(f for f in formations if f["id"] == "4-2-3-1")
-        cls.cats_a = [{"type": "club", "value": "Real Madrid"}]
-        cls.cats_b = [{"type": "club", "value": "Gençlerbirliği"}]
-
-    def test_hundred_seeds_respect_window_and_squad_rules(self):
-        setups = {"A": setup(self.cats_a, self.f433), "B": setup(self.cats_b, self.f4231)}
-        pool_a = pool_for(self.players, self.cats_a)
-        pool_b = pool_for(self.players, self.cats_b)
-        for seed in range(1, 101):
-            with self.subTest(seed=seed):
-                state = create_match(players=self.players, setups=setups, bench_size=BENCH_SIZE,
-                                     seed=seed)
-                for side in ("A", "B"):
-                    self.assertEqual(len(state["sides"][side]["slots"]), 11)
-                    self.assertEqual(len(state["sides"][side]["bench"]), BENCH_SIZE)
-                    self.assertEqual(len(set(all_ids(state, side))), SQUAD_SIZE)
-                self.assertEqual(set(all_ids(state, "A")) & set(all_ids(state, "B")), set())
-                assert_quality_window(self, state, "A", pool_a)
-                assert_quality_window(self, state, "B", pool_b)
+    def test_full_match_keeps_23_players_per_side_and_no_duplicates(self):
+        st, _ = play_full_match(new_match(seed=4))
+        for side in SIDES:
+            self.assertEqual(len(side_ids(st["sides"][side])), SQUAD_SIZE)
+        ids = side_ids(st["sides"]["A"]) + side_ids(st["sides"]["B"])
+        self.assertEqual(len(set(ids)), len(ids))
 
 
 if __name__ == "__main__":
