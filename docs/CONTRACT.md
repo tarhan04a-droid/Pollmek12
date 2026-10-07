@@ -1,5 +1,7 @@
 # Sözleşme (tüm işçiler uyar; değişiklik yalnızca şef/kullanıcı onayıyla)
 
+> NOT: JS sürümü (`src/`, `index.html`) silindi. Güncel kurallar dosyanın sonundaki Streamlit bölümleridir (en son: "Güncelleme 3"). İlk bölümler tarihsel kayıttır.
+
 Proje: PES "Rastgele Seçimli Maç" (Random Selection Match) tarzı oyun. Saf HTML + ES modülleri, build yok, tarayıcıda çalışır. Testler `node --test`. İki kişi aynı cihazda sırayla oynar (hot-seat).
 
 ## Oyun akışı
