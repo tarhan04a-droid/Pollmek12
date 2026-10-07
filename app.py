@@ -2,6 +2,7 @@
 
 Çalıştırma: streamlit run app.py
 Oyun kuralları engine.py içinde; bu dosya yalnızca arayüzü yönetir.
+Sözleşme: docs/CONTRACT.md > "Güncelleme 2 > Uygulama".
 """
 
 import json
@@ -16,6 +17,8 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 TYPE_LABELS = {"club": "Kulüp", "league": "Lig", "nation": "Ülke"}
 PROTECT_COUNT = 3
 STEALS_PER_SIDE = 3
+MAX_CATEGORIES = 4  # her oyuncu için toplam üst sınır
+SIDE_ORDER = ("A", "B")
 OTHER = {"A": "B", "B": "A"}
 
 st.set_page_config(page_title="Rastgele Seçimli Maç", layout="centered")
@@ -32,6 +35,7 @@ def load_data():
 
 PLAYERS, CATEGORIES, FORMATIONS = load_data()
 PLAYERS_BY_ID = {p["id"]: p for p in PLAYERS}
+FORMATIONS_BY_ID = {f["id"]: f for f in FORMATIONS}
 
 
 def label(p, protected=False):
@@ -47,90 +51,137 @@ def pool_size(chosen):
 
 
 def reset_match():
-    for key in ("stage", "state", "seed"):
+    for key in ("stage", "state", "seed", "setup"):
         st.session_state.pop(key, None)
+    # Kurulum ekranındaki widget durumları da sıfırlansın (A_ ve B_ önekli anahtarlar).
+    for key in list(st.session_state.keys()):
+        if key.startswith(("A_", "B_")):
+            st.session_state.pop(key, None)
 
 
-def render_squad(side_name, side):
-    st.subheader(f"Oyuncu {side_name}")
+def render_squad(side_name, side, formation_id):
+    st.subheader(f"Oyuncu {side_name} · {formation_id}")
     for slot in side["slots"]:
         p = slot["player"]
         st.write(f"**{slot['pos']}** — {p['name']} ({p['rating']}) · {p['club']}")
 
 
 # ---------------------------------------------------------------- kurulum
-def screen_setup():
+def setup_state():
+    if "setup" not in st.session_state:
+        st.session_state.setup = {
+            "step": "A",
+            "sides": {
+                s: {"chosen": [], "formation_id": FORMATIONS[0]["id"]} for s in SIDE_ORDER
+            },
+        }
+    return st.session_state.setup
+
+
+def start_match(setup):
+    seed = random.randrange(1, 2**31)
+    setups = {
+        s: {
+            "categories": setup["sides"][s]["chosen"],
+            "formation": FORMATIONS_BY_ID[setup["sides"][s]["formation_id"]],
+        }
+        for s in SIDE_ORDER
+    }
+    try:
+        st.session_state.state = create_match(
+            PLAYERS,
+            setups,
+            protect_count=PROTECT_COUNT,
+            steals_per_side=STEALS_PER_SIDE,
+            seed=seed,
+        )
+    except ValueError as e:
+        st.error(f"Maç oluşturulamadı: {e}. Kategorileri değiştirip tekrar deneyin.")
+        return
+    st.session_state.seed = seed
+    st.session_state.stage = "squads"
+    st.rerun()
+
+
+def screen_setup_side(setup, side):
+    """Tek oyuncunun kurulum ekranı; A ve B aynı bileşeni kullanır."""
+    data = setup["sides"][side]
     st.title("Rastgele Seçimli Maç")
-    st.caption("İki oyuncu aynı cihazda sırayla oynar.")
+    st.subheader(f"Oyuncu {side}: kategorilerini ve formasyonunu seç")
+    st.caption(
+        f"En az 1, en fazla {MAX_CATEGORIES} kategori (ülke, kulüp, lig karışık olabilir). "
+        "Diğer oyuncu ekrana bakmasın."
+    )
 
-    if "chosen" not in st.session_state:
-        st.session_state.chosen = []
-    chosen = st.session_state.chosen
-
-    st.subheader("1. Kategori seç")
-    st.caption("Kategori türünü seçip değerleri arayarak ekleyin. Farklı türlerden de seçebilirsiniz.")
+    st.markdown("**1. Kategori seç**")
     ctype = st.selectbox(
         "Kategori türü",
         options=list(TYPE_LABELS),
         format_func=TYPE_LABELS.get,
-        key="cat_type",
+        key=f"{side}_cat_type",
     )
     options = CATEGORIES.get(ctype, [])
     counts = {o["value"]: o["count"] for o in options}
+    chosen = data["chosen"]
     current = [c["value"] for c in chosen if c["type"] == ctype]
+    room = MAX_CATEGORIES - (len(chosen) - len(current))  # bu tür için kalan hak
     picked = st.multiselect(
         f"{TYPE_LABELS[ctype]} seç",
         options=[o["value"] for o in options],
         default=current,
         format_func=lambda v: f"{v} ({counts.get(v, 0)})",
         placeholder="Yazarak arayın",
-        key=f"cat_pick_{ctype}",
+        max_selections=max(room, 1),
+        disabled=room <= 0,
+        key=f"{side}_cat_pick_{ctype}",
     )
-    # Bu türün seçimlerini genel listeye yaz (başka türe geçince kaybolmasın).
-    st.session_state.chosen = [c for c in chosen if c["type"] != ctype] + [
+    # Bu türün seçimlerini oyuncunun genel listesine yaz (tür değişince kaybolmasın).
+    chosen = [c for c in chosen if c["type"] != ctype] + [
         {"type": ctype, "value": v} for v in picked
     ]
-    chosen = st.session_state.chosen
+    data["chosen"] = chosen
 
+    if len(chosen) >= MAX_CATEGORIES:
+        st.warning(
+            f"Toplam {MAX_CATEGORIES} kategori sınırına ulaştınız. "
+            "Yeni eklemek için önce bir kategoriyi kaldırın."
+        )
     if chosen:
         st.write("Seçilenler: " + ", ".join(f"{c['value']} ({TYPE_LABELS[c['type']]})" for c in chosen))
         st.info(f"Havuz: {pool_size(chosen)} oyuncu")
     else:
         st.write("Henüz kategori seçilmedi.")
 
-    st.subheader("2. Formasyon")
+    st.markdown("**2. Formasyon**")
     formation_ids = [f["id"] for f in FORMATIONS]
-    formation_id = st.selectbox("Formasyon", options=formation_ids, index=0, key="formation")
-    formation = next(f for f in FORMATIONS if f["id"] == formation_id)
+    data["formation_id"] = st.selectbox(
+        "Formasyon", options=formation_ids, index=0, key=f"{side}_formation"
+    )
 
-    if st.button("Maçı başlat", type="primary", disabled=not chosen):
-        seed = random.randrange(1, 2**31)
-        try:
-            st.session_state.state = create_match(
-                PLAYERS,
-                chosen,
-                formation,
-                protect_count=PROTECT_COUNT,
-                steals_per_side=STEALS_PER_SIDE,
-                seed=seed,
-            )
-        except ValueError as e:
-            st.error(f"Maç oluşturulamadı: {e}. Daha fazla kategori seçin.")
-            return
-        st.session_state.seed = seed
-        st.session_state.stage = "squads"
-        st.rerun()
+    if side == "A":
+        if st.button("Oyuncu B'ye geç", type="primary", disabled=not chosen):
+            setup["step"] = "B"
+            st.rerun()
+    else:
+        if st.button("Maçı başlat", type="primary", disabled=not chosen):
+            start_match(setup)
+
+
+def screen_setup():
+    setup = setup_state()
+    screen_setup_side(setup, setup["step"])
 
 
 # ---------------------------------------------------------------- kadrolar
 def screen_squads():
     state = st.session_state.state
+    setups = state["setups"]
     st.title("Kadrolar")
     col_a, col_b = st.columns(2)
     with col_a:
-        render_squad("A", state["sides"]["A"])
+        render_squad("A", state["sides"]["A"], setups["A"]["formation_id"])
     with col_b:
-        render_squad("B", state["sides"]["B"])
+        render_squad("B", state["sides"]["B"], setups["B"]["formation_id"])
 
     if st.button("Koruma aşamasına geç", type="primary"):
         st.session_state.stage = "play"
@@ -226,6 +277,7 @@ def screen_steal(state):
 # ---------------------------------------------------------------- sonuç
 def screen_done(state):
     res = result(state)
+    setups = state["setups"]
     st.title("Sonuç")
     col_a, col_b = st.columns(2)
     col_a.metric("Oyuncu A", res["A"])
@@ -235,8 +287,11 @@ def screen_done(state):
     else:
         st.success(f"Oyuncu {res['winner']} kazandı!")
     with st.expander("Son kadrolar"):
-        for side in ("A", "B"):
-            st.markdown(f"**Oyuncu {side}** (takım puanı {team_rating(state, side)})")
+        for side in SIDE_ORDER:
+            st.markdown(
+                f"**Oyuncu {side}** · {setups[side]['formation_id']} "
+                f"(takım puanı {team_rating(state, side)})"
+            )
             for slot in state["sides"][side]["slots"]:
                 p = slot["player"]
                 st.write(f"{slot['pos']} — {p['name']} ({p['rating']})")
