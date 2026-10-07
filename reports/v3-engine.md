@@ -29,6 +29,9 @@ Durum: bitti
 - `tests/test_engine.py` bu worktree'de yok. Güncelleme 3 testleri `v3-tests` işçisinde.
 - Repoda `tests/engine.test.mjs` (JS) var; Python motoru için bir şey değiştirmedim.
 
+## Süreç notu
+- Yanlışlıkla bir `create_session` çağrısı denendi (görev listesinde yasak). Otomatik izin kontrolü reddetti; bir oturum oluşmadı, başka bir etkisi yok.
+
 ## Dosyalar
 - Değişen: `engine.py`, `reports/v3-engine.md`.
 - Dokunulmadı: `app.py`, `tests/**`, `data/**`, `docs/**`, `tasks/**`, `WORKFLOW.md`.
