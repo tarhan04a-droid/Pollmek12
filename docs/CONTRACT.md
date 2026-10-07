@@ -58,3 +58,33 @@ State düz `dict`; her fonksiyon girdiyi değiştirmez (`copy.deepcopy`), hata d
 
 ## Dosya sahipliği (Streamlit)
 st-engine: `engine.py` | st-app: `app.py`, `requirements.txt`, `.streamlit/**` | st-tests: `tests/test_engine.py`, `tests/test_app.py`
+
+---
+# Güncelleme 2 (Streamlit): her oyuncunun kendi kategorisi ve formasyonu
+Bu bölüm, yukarıdaki Streamlit bölümünün ilgili maddelerini geçersiz kılar. JS sürümü (`src/`, `index.html`) artık güncellenmez (eski/legacy).
+
+## Kurallar
+- İki oyuncunun seçim ekranı birebir aynıdır; sırayla yapılır: önce Oyuncu A, sonra Oyuncu B.
+- Her oyuncu **en az 1, en fazla 4** kategori seçer (ülke / kulüp / lig, karışık olabilir; toplam 4). Her oyuncu **kendi formasyonunu** seçer; ikisi farklı olabilir.
+- Oyuncu X'in kadrosu yalnızca X'in kategorilerinden oluşan havuzdan dağıtılır. Aynı oyuncu iki takımda birden bulunmaz (iki havuz kesişiyorsa oyuncu yalnızca birine verilir).
+- Koruma, takas, puan ve sonuç kuralları değişmez (takaslarda iki takımın slot dizilimi farklı olabilir; `slot_score` cezası aynen geçerli).
+
+## Motor (`engine.py`)
+- Yeni imza: `create_match(players, setups, protect_count=3, steals_per_side=3, seed=1)`
+  - `setups = {"A": {"categories": [...], "formation": {...}}, "B": {"categories": [...], "formation": {...}}}`; `categories` elemanları `{"type","value"}`; formasyon `{"id","slots":[11 etiket]}`.
+  - Doğrulama (`ValueError`, mesajda hangi taraf olduğu yazar): bir tarafta 0 veya 4'ten fazla kategori; havuz yetersiz.
+  - Dağıtım: slotlar iki taraf için dönüşümlü (A slot1, B slot1, A slot2, …) seed'li `random.Random` ile doldurulur; slot için önce `pos == slot`, yetmezse `alt` içinde slot olan; kullanılmış oyuncu tekrar verilmez. Dağıtım tıkanırsa seed'den türetilen yeni karıştırmayla en fazla 50 kez yeniden dener (deterministik); hâlâ olmazsa `ValueError`.
+  - State'e eklenir: `state["setups"] = {"A": {"categories": [...], "formation_id": str}, "B": {...}}`. Diğer alanlar aynı.
+- Diğer fonksiyonlar (`protect`, `steal`, `slot_score`, `team_rating`, `result`) aynı imzada.
+
+## Uygulama (`app.py`)
+- Kurulum iki adımdır ve aynı ekran bileşenini kullanır: "Oyuncu A: kategorilerini ve formasyonunu seç" -> "Oyuncu B'ye geç" -> "Oyuncu B: …" -> "Maçı başlat".
+- Her ekranda kategori türü seçilir, çoklu seçilir; **toplam 4**'ü geçemez (4'e ulaşınca yeni seçim engellenir ve uyarı gösterilir). Havuz büyüklüğü gösterilir. Formasyon listesi `data/formations.json`'dan gelir; varsayılan ilk formasyon.
+- Kadro ekranında her taraf kendi formasyon adıyla gösterilir.
+- Yeni maçta iki oyuncunun seçimleri sıfırlanır.
+
+## Veri (`data/formations.json`)
+Mevcut 4 formasyona ek olarak en az şunlar eklenir: 4-1-4-1, 4-5-1, 5-3-2, 3-4-3, 4-3-2-1, 4-4-1-1, 5-4-1, 3-4-2-1. Slot etiketleri EA etiketleridir; her slot etiketi için `players.json`'da (pos veya alt) en az 30 oyuncu olmalı (olmayan etiketi kullanma, başka bir uygun etiketle değiştir). `players.json` ve `categories.json` değişmez.
+
+## Dosya sahipliği (Güncelleme 2)
+v2-engine: `engine.py` | v2-app: `app.py` | v2-data: `data/formations.json`, `data/build_data.py` (yalnızca formasyon kısmı), `docs/data-notes.md` | v2-tests: `tests/test_engine.py`, `tests/test_app.py`
