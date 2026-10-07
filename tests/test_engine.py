@@ -168,10 +168,11 @@ class CreateMatchTests(unittest.TestCase):
             self.assertRegex(str(cm.exception), rf"\b{side}\b")
 
     def test_four_categories_allowed(self):
+        # Beta/L1 kullanılmaz: B'nin havuzunu tüketmemek için (havuzlar kesişirse oyuncu tek tarafta).
         four = [
             {"type": "club", "value": "Alpha"},
-            {"type": "club", "value": "Beta"},
-            {"type": "league", "value": "L1"},
+            {"type": "club", "value": "Gamma"},
+            {"type": "league", "value": "L2"},
             {"type": "nation", "value": "Nationa"},
         ]
         setups = default_setups()
