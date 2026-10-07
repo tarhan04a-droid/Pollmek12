@@ -1,10 +1,11 @@
-"""Streamlit uygulama testleri (docs/CONTRACT.md "Güncelleme 2" > Uygulama).
+"""Streamlit uygulama testleri (docs/CONTRACT.md "Güncelleme 3" > Uygulama).
 
 streamlit kurulu değilse veya app.py yoksa testler atlanır.
-İki adımlı kurulum: Oyuncu A seç -> "Oyuncu B'ye geç" -> Oyuncu B seç -> "Maçı başlat".
-Widget'lar etiketleriyle bulunur (anahtar adlarına bağlı değil). Beklenen etiketler:
-  "Kategori türü", "Kulüp seç" / "Lig seç" / "Ülke seç", "Formasyon",
-  butonlar "Oyuncu B'ye geç", "Maçı başlat".
+Akış: kurulum (Oyuncu A -> "Oyuncu B'ye geç" -> Oyuncu B -> "Maçı başlat") -> kadrolar
+-> "Takas turlarını başlat" -> takas ("Takası yap") -> koruma ("Korumayı onayla") -> ... -> sonuç.
+Koruma ayrı bir ekran değil; her takastan sonra aynı ekranda gelir. Son takastan sonra gelmez.
+Widget'lar etiketleriyle bulunur (anahtar adlarına bağlı değil). Beklenen etiketler aşağıdaki
+sabitlerde toplandı; app.py farklı etiket kullanırsa yalnızca bu sabitler güncellenir.
 Çalıştırma (repo kökünden):  python3 -m unittest discover -s tests -p "test_*.py"
 """
 import json
@@ -23,12 +24,32 @@ TYPE_LABELS = {"club": "Kulüp", "league": "Lig", "nation": "Ülke"}
 TEXT_KINDS = ("markdown", "subheader", "caption", "header", "title", "text",
               "success", "info", "warning", "error", "metric")
 
+# Etiket sözleşmesi (app.py ile eşleşmeli)
+BTN_NEXT_SIDE = "Oyuncu B'ye geç"
+BTN_START_MATCH = "Maçı başlat"
+BTN_START_STEALS = "Takas turlarını başlat"
+BTN_STEAL = "Takası yap"
+BTN_PROTECT = "Korumayı onayla"
+SEL_TARGET = "Rakipten alınacak oyuncu"
+SEL_GIVE = "Karşılığında verilecek oyuncu"
+MULTI_PROTECT = "Korunacak oyuncular"
+PROTECT_MAX = 3
+TOTAL_STEALS = 6
+
 
 def find(at, kind, label):
     matches = [w for w in at.get(kind) if getattr(w, "label", None) == label]
     if not matches:
         raise AssertionError(f"{kind} etiketi bulunamadı: {label!r}")
     return matches[0]
+
+
+def has(at, kind, label):
+    return any(getattr(w, "label", None) == label for w in at.get(kind))
+
+
+def button_labels(at):
+    return [getattr(b, "label", None) for b in at.get("button")]
 
 
 def all_text(at):
@@ -41,6 +62,10 @@ def all_text(at):
             elif value is not None:
                 parts.append(str(value))
     return "\n".join(parts)
+
+
+def no_exceptions(at):
+    return len(at.exception) == 0
 
 
 def pick(at, ctype, values):
@@ -67,6 +92,45 @@ def start_app():
     return AppTest.from_file(APP_PATH, default_timeout=30).run()
 
 
+def setup_two_sides(at):
+    """Oyuncu A: Chelsea / 4-4-2; Oyuncu B: Premier League / 3-5-2 -> kadro ekranı."""
+    pick(at, "club", ["Chelsea"])
+    set_formation(at, "4-4-2")
+    find(at, "button", BTN_NEXT_SIDE).click().run()
+    pick(at, "league", ["Premier League"])
+    set_formation(at, "3-5-2")
+    find(at, "button", BTN_START_MATCH).click().run()
+    return at
+
+
+def steal_and_protect(at, keep_first=PROTECT_MAX):
+    """Sıradaki takası yapar; takas sonrası koruma çıkarsa ilk `keep_first` oyuncuyu korur.
+
+    Döner: (alınan oyuncu id'si veya None, koruma ekranı geldi mi)."""
+    target = find(at, "selectbox", SEL_TARGET).value
+    find(at, "button", BTN_STEAL).click().run()
+    if not has(at, "multiselect", MULTI_PROTECT):
+        return target, False
+    options = find(at, "multiselect", MULTI_PROTECT).options
+    chosen = options[:keep_first]
+    find(at, "multiselect", MULTI_PROTECT).set_value(chosen).run()
+    find(at, "button", BTN_PROTECT).click().run()
+    return target, True
+
+
+def play_full_match(at):
+    """Tüm takasları oynar; her takastan sonra koruma onaylanır. Oynanan takas sayısını döner."""
+    steals = 0
+    for _ in range(TOTAL_STEALS + 4):
+        if not has(at, "button", BTN_STEAL):
+            break
+        steal_and_protect(at)
+        steals += 1
+        if not no_exceptions(at):
+            break
+    return steals
+
+
 @unittest.skipIf(AppTest is None, "streamlit kurulu değil")
 @unittest.skipUnless(os.path.exists(APP_PATH), "app.py yok")
 class AppSetupFlowTest(unittest.TestCase):
@@ -77,7 +141,7 @@ class AppSetupFlowTest(unittest.TestCase):
 
     def test_app_opens_without_exception(self):
         at = start_app()
-        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
 
     def test_default_formation_is_first_in_data(self):
         at = start_app()
@@ -85,20 +149,17 @@ class AppSetupFlowTest(unittest.TestCase):
 
     def test_two_step_setup_then_squads_show_each_formation(self):
         at = start_app()
-
-        # 1. adım: Oyuncu A
         pick(at, "club", ["Chelsea"])
         set_formation(at, "4-4-2")
-        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
-        find(at, "button", "Oyuncu B'ye geç").click().run()
-        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        find(at, "button", BTN_NEXT_SIDE).click().run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
 
-        # 2. adım: Oyuncu B (A'nın seçimleri B'de kalmamalı; B kendi seçimini yapar)
         self.assertIn("Oyuncu B", all_text(at))
         pick(at, "league", ["Premier League"])
         set_formation(at, "3-5-2")
-        find(at, "button", "Maçı başlat").click().run()
-        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        find(at, "button", BTN_START_MATCH).click().run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
 
         text = all_text(at)
         self.assertIn("4-4-2", text)
@@ -108,15 +169,14 @@ class AppSetupFlowTest(unittest.TestCase):
     def test_start_is_not_available_before_side_b_is_set_up(self):
         at = start_app()
         pick(at, "club", ["Chelsea"])
-        labels = [getattr(b, "label", None) for b in at.get("button")]
-        self.assertIn("Oyuncu B'ye geç", labels)
-        self.assertNotIn("Maçı başlat", labels)
+        self.assertIn(BTN_NEXT_SIDE, button_labels(at))
+        self.assertNotIn(BTN_START_MATCH, button_labels(at))
 
     def test_side_b_without_categories_cannot_start(self):
         at = start_app()
         pick(at, "club", ["Chelsea"])
-        find(at, "button", "Oyuncu B'ye geç").click().run()
-        btn = find(at, "button", "Maçı başlat")
+        find(at, "button", BTN_NEXT_SIDE).click().run()
+        btn = find(at, "button", BTN_START_MATCH)
         if btn.disabled:
             return
         btn.click().run()
@@ -130,11 +190,70 @@ class AppSetupFlowTest(unittest.TestCase):
         pick(at, "nation", ["England"])
         self.assertEqual(selected_total(at), 4)
 
-        # 5. kategori: engellenmeli ve uyarı gösterilmeli.
         pick(at, "club", ["Chelsea", "Boca Juniors", "Nacional"])
         self.assertEqual(selected_total(at), 4)
         self.assertGreater(len(at.warning), 0, "4 kategoriden sonra uyarı bekleniyordu")
-        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+
+
+@unittest.skipIf(AppTest is None, "streamlit kurulu değil")
+@unittest.skipUnless(os.path.exists(APP_PATH), "app.py yok")
+class AppStealFlowTest(unittest.TestCase):
+    def test_squads_screen_starts_steals_directly_without_protect_screen(self):
+        at = setup_two_sides(start_app())
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        labels = button_labels(at)
+        self.assertIn(BTN_START_STEALS, labels)
+        self.assertNotIn("Koruma aşamasına geç", labels)
+
+    def test_steal_screen_has_no_protect_step_before_the_steal(self):
+        at = setup_two_sides(start_app())
+        find(at, "button", BTN_START_STEALS).click().run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertIn("Oyuncu A", all_text(at))
+        self.assertTrue(has(at, "button", BTN_STEAL))
+        self.assertFalse(has(at, "multiselect", MULTI_PROTECT))
+
+    def test_protect_step_appears_after_steal_and_hands_turn_to_b(self):
+        at = setup_two_sides(start_app())
+        find(at, "button", BTN_START_STEALS).click().run()
+        target, protect_shown = steal_and_protect(at)
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertTrue(protect_shown, "takastan sonra koruma adımı gelmeliydi")
+        self.assertIn("Oyuncu B", all_text(at))
+        self.assertIn("Kalan takas hakkı", all_text(at))
+
+    def test_newly_stolen_player_can_be_protected(self):
+        at = setup_two_sides(start_app())
+        find(at, "button", BTN_START_STEALS).click().run()
+        target = find(at, "selectbox", SEL_TARGET).value
+        find(at, "button", BTN_STEAL).click().run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertIn(target, find(at, "multiselect", MULTI_PROTECT).options)
+
+    def test_protect_accepts_empty_selection(self):
+        at = setup_two_sides(start_app())
+        find(at, "button", BTN_START_STEALS).click().run()
+        find(at, "button", BTN_STEAL).click().run()
+        find(at, "multiselect", MULTI_PROTECT).set_value([]).run()
+        find(at, "button", BTN_PROTECT).click().run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertIn("Oyuncu B", all_text(at))
+
+    def test_full_match_setup_to_result(self):
+        at = setup_two_sides(start_app())
+        find(at, "button", BTN_START_STEALS).click().run()
+        steals = play_full_match(at)
+
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertEqual(steals, TOTAL_STEALS)
+        self.assertFalse(has(at, "button", BTN_STEAL), "takas bitince takas ekranı kalmamalı")
+        self.assertFalse(has(at, "multiselect", MULTI_PROTECT),
+                         "son takastan sonra koruma adımı gelmemeli")
+        text = all_text(at)
+        self.assertTrue(any(word in text for word in ("kazandı", "Berabere")), text)
+        self.assertIn("Yeni maç", button_labels(at))
+        self.assertEqual(len(at.error), 0, [e.value for e in at.error])
 
 
 if __name__ == "__main__":
