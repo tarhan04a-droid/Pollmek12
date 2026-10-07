@@ -1,0 +1,4 @@
+# v4-tests — Python testleri
+Rapor: `reports/v4-tests.md`
+`docs/CONTRACT.md` > "Güncelleme 4" bölümüne göre `tests/test_engine.py` ve `tests/test_app.py`'yi güncelle: her tarafta 11+8 oyuncu ve hiçbir oyuncunun tekrar etmemesi; havuz yetersizse hata; steal yedek-yedek, ilk11-yedek, yedek-ilk11 yer değişimleri ve hedefin korumalı olması hatası; protect 19 oyuncudan; swap_bench (doğru takas, yanlış sıra/aralık hatası, korumalı oyuncu da yer değiştirebilir); son takastan sonra phase "arrange", confirm_arrange ve ikisi onaylayınca "done"; team_rating yalnız ilk 11; determinizm. App testi: kadro ekranında yedekler, yer değiştirme, arrange ekranı, sonuç. AppTest notu: `.options` etiketlerdir, `set_value` oyuncu id'si ister (id'leri session_state['state'] üzerinden al). `engine.py`/`app.py` henüz sende olmayabilir: sözleşmeye göre yaz. Çalıştırma: `python3 -m unittest discover -s tests -p "test_*.py"`.
+Sahip: `tests/test_engine.py`, `tests/test_app.py`.

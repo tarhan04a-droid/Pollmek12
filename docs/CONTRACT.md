@@ -115,3 +115,33 @@ Bu bölüm önceki bölümlerin koruma ile ilgili maddelerini geçersiz kılar (
 
 ## Dosya sahipliği (Güncelleme 3)
 v3-engine: `engine.py` | v3-app: `app.py` | v3-tests: `tests/test_engine.py`, `tests/test_app.py`
+
+---
+# Güncelleme 4 (Streamlit): 8 yedek oyuncu
+Bu bölüm önceki bölümlerin ilgili maddelerini geçersiz kılar.
+
+## Kural
+- Her taraf, ilk 11'e ek olarak **8 yedek** alır (toplam 19 oyuncu). Yedekler, ilk 11 dağıtıldıktan sonra tarafın kendi kategori havuzundan, pozisyon fark etmeksizin rastgele ve tekrarsız dağıtılır (iki taraf ve ilk 11 ile çakışmaz; iki taraf dönüşümlü seed'li).
+- **Takas** yedekleri de kapsar: rakibin korumasız herhangi bir oyuncusu (ilk 11 veya yedek) alınabilir, kendi korumasız herhangi bir oyuncun (ilk 11 veya yedek) verilebilir. Oyuncular birbirinin yerine (slot veya yedek sırası) geçer.
+- **Koruma** 19 oyuncunun hepsini kapsar (yine en fazla `protect_count` = 3).
+- **Yerleştirme:** taraf kendi ilk 11'indeki bir oyuncuyu bir yedekle yer değiştirebilir (sınırsız, mülkiyet değişmez, korumalılar da yer değiştirebilir). Takas turunda yalnızca sırası gelen taraf, kendi sırası boyunca (takas veya koruma adımında) yerleştirme yapabilir.
+- Son takastan sonra maç hemen bitmez: `phase="arrange"` olur, iki taraf da son kez dizilişini düzenler ve onaylar; ikisi de onaylayınca `phase="done"`.
+- Puan: yalnızca ilk 11 (`slot_score` cezası aynı). Yedekler puana katılmaz.
+
+## Motor (`engine.py`)
+- `create_match(players, setups, protect_count=3, steals_per_side=3, bench_size=8, seed=1)`; havuz ilk 11 + yedek için yetmezse `ValueError` (mesajda taraf).
+- state eklenir: `sides[X]["bench"]` (`bench_size` uzunlukta oyuncu dict listesi), `state["arranged"] = {"A": False, "B": False}`; `phase`: `"steal"|"arrange"|"done"`. Diğer alanlar aynı (`step`, `turn`, `steals_left`, `protected_ids`...).
+- `steal(state, side, target_id, give_id)`: `target_id` rakibin ilk 11'inde veya yedeğinde, korumasız; `give_id` kendi ilk 11'inde veya yedeğinde, korumasız. Yer değişimi: hedef oyuncu verenin bulunduğu yere (slot veya yedek sırası), verilen oyuncu hedefin bulunduğu yere geçer. Son takas sonrası `phase="arrange"` (koruma adımı atlanır), değilse `step="protect"`.
+- `protect(state, side, player_ids)`: id'ler kendi 19 oyuncusundan; diğer kurallar aynı.
+- `swap_bench(state, side, slot_index, bench_index)` (yeni): `phase=="steal"` ise `turn==side` olmalı; `phase=="arrange"` ise `arranged[side]` False olmalı; aksi halde `ValueError`. İlk 11'deki `slot_index` oyuncusu ile `bench_index` yedeği yer değiştirir. İndeks aralık dışıysa `ValueError`.
+- `confirm_arrange(state, side)` (yeni): yalnızca `phase=="arrange"` ve `arranged[side]` False iken; `arranged[side]=True`; ikisi de True ise `phase="done"`.
+- `slot_score`, `team_rating` (yalnız ilk 11), `result` aynı; `result` yalnızca `phase=="done"`.
+
+## Uygulama (`app.py`)
+- Kadro ekranı her tarafın ilk 11'ini (formasyon adıyla) ve **Yedekler** listesini (8 oyuncu: ad, poz, puan) gösterir.
+- Takas ekranında rakipten alınacak ve kendinden verilecek listeler 19 oyuncuyu içerir; yedekler "Yedek" etiketlidir, korumalılar devre dışıdır. Koruma çoklu seçimi 19 oyuncudan seçer.
+- Sırası gelen taraf, sıra boyunca "Kadro düzeni" bölümünde bir ilk 11 oyuncusu ve bir yedek seçip "Yer değiştir" ile değişimi yapar (pozisyon uyumsuzsa uyarı gösterilir: puandan −10).
+- `phase=="arrange"`: önce Oyuncu A sonra Oyuncu B (sıra sırayla, `arranged` bayraklarına göre) aynı yerleştirme bölümüyle düzenini yapar ve "Düzeni onayla" der; ikisi de onaylayınca sonuç ekranı. Sonuç ekranı iki tarafın ilk 11'ini ve yedeklerini gösterir.
+
+## Dosya sahipliği (Güncelleme 4)
+v4-engine: `engine.py` | v4-app: `app.py` | v4-tests: `tests/test_engine.py`, `tests/test_app.py`
