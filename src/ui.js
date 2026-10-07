@@ -83,9 +83,13 @@ function go(view) {
   window.scrollTo(0, 0);
 }
 
+function defaultFormationId() {
+  return data.formations[0]?.id ?? null;
+}
+
 function resetAll() {
   Object.assign(ui, {
-    view: 'setup', type: 'club', query: '', picked: [], formationId: null,
+    view: 'setup', type: 'club', query: '', picked: [], formationId: defaultFormationId(),
     setupError: '', match: null, selected: [], target: null, give: null, message: '',
   });
   render();
@@ -280,6 +284,7 @@ function stealHtml() {
   const rivalProtected = new Set(m.sides[other].protectedIds);
   const rivalPlayers = m.sides[other].slots.map((s) => s.player);
   const ownPlayers = m.sides[turn].slots.map((s) => s.player);
+  const ownProtected = new Set(m.sides[turn].protectedIds);
   const ready = ui.target && ui.give;
   return `
   <p class="banner">Sıra: <b>Oyuncu ${turn}</b> · Kalan takas hakkı: ${m.stealsLeft[turn]}</p>
@@ -296,9 +301,12 @@ function stealHtml() {
   </section>
   <section class="card">
     <h2>2. Karşılığında ver (Oyuncu ${turn})</h2>
+    <p class="hint">Korumalı oyuncular verilemez.</p>
     <div class="grid">${ownPlayers.map((p) => playerBtn(p, {
       action: 'steal-give',
       pressed: ui.give === p.id,
+      disabled: ownProtected.has(p.id),
+      tag: ownProtected.has(p.id) ? 'korumalı' : '',
     })).join('')}</div>
   </section>
   <p class="error" role="alert">${esc(ui.message)}</p>
@@ -434,6 +442,7 @@ async function init() {
       loadJson('data/formations.json'),
     ]);
     Object.assign(data, { players, categories, formations });
+    ui.formationId = defaultFormationId();
     render();
   } catch (err) {
     app.innerHTML = `
