@@ -70,7 +70,7 @@ Slot başına havuz (`pos == etiket` veya `etiket ∈ alt`, tüm 10.852 oyuncu �
 Notlar:
 - Wing-back (LWB/RWB) ve CF etiketleri veride yok; 5-3-2, 5-4-1 ve 3-4-3 kanat görevleri LB/RB veya LM/RM ile verildi.
 - 4-3-2-1 ve 3-4-2-1'deki iki "CAM" slotu aynı etiketi taşır (LCAM/RCAM ayrımı EA etiketlerinde yok); havuz iki slot için de yeterli.
-- Ortak tekrar: havuz slot sayısına göre değil, oyuncu başına tek kullanım kuralına göre dağıtılır; havuz boyutu yalnızca yeterlilik kontrolüdür.
+- Slot havuzu yalnızca her etiket için yeterli aday olduğunu gösterir; asıl yeterlilik, aynı oyuncunun iki kez verilmemesi kuralıyla dağıtımda belirlenir.
 
 ## Bilinen sorunlar / dikkat
 - **Aynı görünen ad:** 79 çift oyuncu aynı `name` değerini taşıyor. Ayırt etmek için `id` kullanılmalı; UI'da ad yanına kulüp veya ulusal takım eklenmesi önerilir.
