@@ -109,35 +109,61 @@ def _deal_order(slot_lists, bench_size):
     return order
 
 
-def _pick_slot(free, pos, rng, quality_window):
+def _start_bests(pool):
+    """Havuzun BAŞLANGIÇ en iyileri (hiçbir oyuncu kullanılmadan önce):
+    "pos": pozisyon etiketi -> o etiketli en yüksek rating;
+    "alt": slot etiketi -> alt'ında o etiket olan (pos'u o etiket olmayan) en yüksek rating."""
+    by_pos = {}
+    by_alt = {}
+    for p in pool:
+        by_pos[p["pos"]] = max(by_pos.get(p["pos"], p["rating"]), p["rating"])
+        for label in p.get("alt") or []:
+            if label != p["pos"]:
+                by_alt[label] = max(by_alt.get(label, p["rating"]), p["rating"])
+    return {"pos": by_pos, "alt": by_alt}
+
+
+def _pick_slot(free, pos, rng, quality_window, start):
     """Slot için oyuncu seçer. Aday kümesi: önce pos == slot, yoksa alt'ta slot olanlar.
-    quality_window None ise (eski davranış) kümenin ilk elemanı; değilse en iyi
-    puandan en fazla quality_window geride olanlar arasından seed'li rastgele."""
+    Kalite penceresi, kümenin BAŞLANGIÇ en iyisine göre uygulanır (kullanılmış olsa bile):
+    en fazla quality_window geride, hâlâ boşta olanlar arasından seed'li eşit olasılıklı seçim.
+    Pencerede kimse kalmadıysa (geri çekilme) pencere kalan en iyiye göre uygulanır.
+    quality_window None ise (eski davranış) kümenin ilk elemanı."""
     cands = [p for p in free if p["pos"] == pos]
-    if not cands:
+    if cands:
+        start_best = start["pos"][pos]
+    else:
         cands = [p for p in free if pos in (p.get("alt") or [])]
-    if not cands:
-        return None
+        if not cands:
+            return None
+        start_best = start["alt"][pos]
     if quality_window is None:
         return cands[0]
-    best = max(p["rating"] for p in cands)
-    eligible = [p for p in cands if p["rating"] >= best - quality_window]
+    eligible = [p for p in cands if p["rating"] >= start_best - quality_window]
+    if not eligible:
+        # Geri çekilme: pencere kümenin kalan en iyisine göre (küme boş değil, en iyi kendisi uygun).
+        remaining_best = max(p["rating"] for p in cands)
+        eligible = [p for p in cands if p["rating"] >= remaining_best - quality_window]
     return rng.choice(eligible)
 
 
-def _pick_bench(free, rng, quality_window):
-    """Yedek için oyuncu seçer. Her aday, kendi birincil pozisyonundaki kalan en iyi
-    oyuncuya göre değerlendirilir; en fazla quality_window geride olanlar adaydır."""
+def _pick_bench(free, rng, quality_window, start):
+    """Yedek için oyuncu seçer. Her aday, kendi birincil pozisyonunun BAŞLANGIÇ en iyisine
+    göre değerlendirilir; en fazla quality_window geride, boşta olanlar adaydır (pozisyon
+    fark etmez). Pencerede kimse kalmadıysa, pencere her pozisyonun KALAN en iyisine göre
+    uygulanır (her pozisyonun kalan en iyisi her zaman uygun olduğu için aday küme boş kalmaz)."""
     if quality_window is None:
         return free[0]
-    best_at = {}
-    for p in free:
-        best_at[p["pos"]] = max(best_at.get(p["pos"], p["rating"]), p["rating"])
-    eligible = [p for p in free if p["rating"] >= best_at[p["pos"]] - quality_window]
+    eligible = [p for p in free if p["rating"] >= start["pos"][p["pos"]] - quality_window]
+    if not eligible:
+        remaining_best = {}
+        for p in free:
+            remaining_best[p["pos"]] = max(remaining_best.get(p["pos"], p["rating"]), p["rating"])
+        eligible = [p for p in free if p["rating"] >= remaining_best[p["pos"]] - quality_window]
     return rng.choice(eligible)
 
 
-def _try_deal(pools, slot_lists, order, rng, quality_window):
+def _try_deal(pools, starts, slot_lists, order, rng, quality_window):
     """Bir deneme. Başarısızsa (False, taraf, etiket, None) döner; yedekte etiket None."""
     shuffled = {side: rng.sample(pools[side], len(pools[side])) for side in SIDES}
     used = set()
@@ -147,12 +173,12 @@ def _try_deal(pools, slot_lists, order, rng, quality_window):
         if index is None:
             if not free:
                 return False, side, None, None
-            pick = _pick_bench(free, rng, quality_window)
+            pick = _pick_bench(free, rng, quality_window, starts[side])
             used.add(pick["id"])
             dealt[side]["bench"].append(copy.deepcopy(pick))
             continue
         pos = slot_lists[side][index]
-        pick = _pick_slot(free, pos, rng, quality_window)
+        pick = _pick_slot(free, pos, rng, quality_window, starts[side])
         if pick is None:
             return False, side, pos, None
         used.add(pick["id"])
@@ -164,10 +190,13 @@ def _deal_sides(pools, slot_lists, bench_size, seed, quality_window):
     """İki tarafı çakışmasız dağıtır. Tıkanırsa seed'den türetilen yeni karıştırmayla
     en fazla MAX_DEAL_ATTEMPTS kez dener; hâlâ olmazsa ValueError."""
     order = _deal_order(slot_lists, bench_size)
+    # Kalite penceresinin referansı: her tarafın kendi havuzunun başlangıç en iyileri
+    # (ortak havuzda iki taraf aynı değerleri alır).
+    starts = {side: _start_bests(pools[side]) for side in SIDES}
     failure = None
     for attempt in range(MAX_DEAL_ATTEMPTS):
         rng = random.Random(seed) if attempt == 0 else random.Random(f"{seed}:{attempt}")
-        ok, side, label, dealt = _try_deal(pools, slot_lists, order, rng, quality_window)
+        ok, side, label, dealt = _try_deal(pools, starts, slot_lists, order, rng, quality_window)
         if ok:
             return dealt
         failure = (side, label)
