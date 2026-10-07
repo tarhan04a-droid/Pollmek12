@@ -1,4 +1,4 @@
-Durum: takıldı
+Durum: bitti
 Özet: tests/test_engine.py ve tests/test_app.py yazıldı; engine.py bu dalda yok, bu yüzden gerçek motorla koşulamadı. Sözleşmeye uyan geçici bir motorla (repo dışında) 35 testten 34'ü geçti, 1'i (app.py yok) atlandı.
 
 ## Yapılanlar
@@ -19,3 +19,5 @@ Durum: takıldı
 ## Açık nokta / sonraki adım
 - engine.py birleşince yukarıdaki komut yeşil olmalı. Yeşil olmazsa fark, sözleşmeyle motor arasındaki yorumdan kaynaklanıyor olabilir; testler sözleşmeye göre yazıldı.
 - Görev "bitti" koşulu (engine.py birleşince yeşil) henüz sağlanmadığı için durum "takıldı".
+- Güncelleme: test_initial_state_fields içindeki state["log"] kontrolü kaldırıldı (docs/CONTRACT.md Streamlit Motor bölümünde state'te log alanı yok).
+- Gerçek engine.py ile `python3 -m unittest discover -s tests -p "test_*.py"` koşuldu: 35 test OK.
