@@ -33,13 +33,44 @@ Boş `club`/`league`/`nation` değeri yok (erkek alt kümede). Kategoriler sayı
 Veride LWB, RWB, CF gibi etiketler hiç yok.
 
 ## Formasyonlar
-Tümü 11 slot, tüm slot etiketleri için havuz >= 30 (build betiği doğrular):
-- 4-3-3: GK, LB, CB, CB, RB, CM, CM, CM, LW, ST, RW (sözleşmedeki örnek)
-- 4-4-2: GK, LB, CB, CB, RB, LM, CM, CM, RM, ST, ST
-- 3-5-2: GK, CB, CB, CB, LM, CDM, CAM, CM, RM, ST, ST
-- 4-2-3-1: GK, LB, CB, CB, RB, CDM, CDM, LW, CAM, RW, ST
+12 formasyon (11 slot her biri). Tüm slot etiketleri için havuz (`pos` veya `alt`) >= 30; build betiği doğrular. En küçük havuz GK (961).
 
-3-5-2 ve 4-2-3-1 slot seçimleri bu veriye göre yapıldı; EA etiketine uygun ama sözleşmede örnek yoktu.
+| id | slotlar |
+|----|---------|
+| 4-3-3 | GK, LB, CB, CB, RB, CM, CM, CM, LW, ST, RW |
+| 4-4-2 | GK, LB, CB, CB, RB, LM, CM, CM, RM, ST, ST |
+| 3-5-2 | GK, CB, CB, CB, LM, CDM, CAM, CM, RM, ST, ST |
+| 4-2-3-1 | GK, LB, CB, CB, RB, CDM, CDM, LW, CAM, RW, ST |
+| 4-1-4-1 | GK, LB, CB, CB, RB, CDM, LM, CM, CM, RM, ST |
+| 4-5-1 | GK, LB, CB, CB, RB, LM, CM, CAM, CM, RM, ST |
+| 5-3-2 | GK, LB, CB, CB, CB, RB, CM, CM, CM, ST, ST |
+| 3-4-3 | GK, CB, CB, CB, LM, CM, CM, RM, LW, ST, RW |
+| 4-3-2-1 | GK, LB, CB, CB, RB, CM, CM, CM, CAM, CAM, ST |
+| 4-4-1-1 | GK, LB, CB, CB, RB, LM, CM, CM, RM, CAM, ST |
+| 5-4-1 | GK, LB, CB, CB, CB, RB, LM, CM, CM, RM, ST |
+| 3-4-2-1 | GK, CB, CB, CB, LM, CM, CM, RM, CAM, CAM, ST |
+
+Slot başına havuz (`pos == etiket` veya `etiket ∈ alt`, tüm 10.852 oyuncu üzerinden):
+
+| slot | havuz |
+|------|------:|
+| GK | 961 |
+| LB | 1.336 |
+| RB | 1.353 |
+| CB | 2.668 |
+| CDM | 2.682 |
+| CM | 3.358 |
+| LM | 2.455 |
+| RM | 2.390 |
+| CAM | 2.281 |
+| LW | 1.657 |
+| RW | 1.584 |
+| ST | 2.090 |
+
+Notlar:
+- Wing-back (LWB/RWB) ve CF etiketleri veride yok; 5-3-2, 5-4-1 ve 3-4-3 kanat görevleri LB/RB veya LM/RM ile verildi.
+- 4-3-2-1 ve 3-4-2-1'deki iki "CAM" slotu aynı etiketi taşır (LCAM/RCAM ayrımı EA etiketlerinde yok); havuz iki slot için de yeterli.
+- Ortak tekrar: havuz slot sayısına göre değil, oyuncu başına tek kullanım kuralına göre dağıtılır; havuz boyutu yalnızca yeterlilik kontrolüdür.
 
 ## Bilinen sorunlar / dikkat
 - **Aynı görünen ad:** 79 çift oyuncu aynı `name` değerini taşıyor. Ayırt etmek için `id` kullanılmalı; UI'da ad yanına kulüp veya ulusal takım eklenmesi önerilir.
