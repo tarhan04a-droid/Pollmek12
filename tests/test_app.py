@@ -49,6 +49,7 @@ PROTECT_MAX = 3
 TOTAL_STEALS = 6
 BENCH_SIZE = 8
 SQUAD_SIZE = 19
+OTHER_SIDE = {"A": "B", "B": "A"}
 
 
 def find(at, kind, label):
@@ -139,7 +140,16 @@ def steal_and_protect(at, keep_first=PROTECT_MAX):
     """Sıradaki takası yapar; takas sonrası koruma çıkarsa ilk `keep_first` oyuncuyu korur.
 
     Döner: (alınan oyuncu id'si, koruma ekranı geldi mi)."""
-    target = find(at, "selectbox", SEL_TARGET).value
+    state = at.session_state["state"]
+    turn = state["turn"]
+    other = OTHER_SIDE[turn]
+    # Seçimler id ile yapılır: hedef rakipten korumasız ilk oyuncu, karşılık kendi korumasız ilk oyuncusu.
+    target = next(pid for pid in squad_ids(at, other) + bench_ids(at, other)
+                  if pid not in state["sides"][other]["protected_ids"])
+    give = next(pid for pid in squad_ids(at, turn) + bench_ids(at, turn)
+                if pid not in state["sides"][turn]["protected_ids"])
+    find(at, "selectbox", SEL_TARGET).set_value(target).run()
+    find(at, "selectbox", SEL_GIVE).set_value(give).run()
     find(at, "button", BTN_STEAL).click().run()
     if not has(at, "multiselect", MULTI_PROTECT):
         return target, False
@@ -148,6 +158,14 @@ def steal_and_protect(at, keep_first=PROTECT_MAX):
     find(at, "multiselect", MULTI_PROTECT).set_value(chosen).run()
     find(at, "button", BTN_PROTECT).click().run()
     return target, True
+
+
+def swap_by_index(at, slot_idx, bench_idx):
+    """Kadro düzeni bölümünde ilk 11 (slot_idx) ile yedek (bench_idx) yer değiştirir.
+    Bu selectbox'ların değerleri oyuncu id'si değil, listedeki indekstir."""
+    find(at, "selectbox", SEL_SLOT).set_value(slot_idx).run()
+    find(at, "selectbox", SEL_BENCH).set_value(bench_idx).run()
+    find(at, "button", BTN_SWAP).click().run()
 
 
 def finish_arrangement(at):
@@ -162,6 +180,8 @@ def finish_arrangement(at):
 
 def play_full_match(at):
     """Tüm takasları oynar, düzeni onaylatır. Oynanan takas sayısını döner."""
+    if has(at, "button", BTN_START_STEALS):
+        find(at, "button", BTN_START_STEALS).click().run()
     steals = 0
     for _ in range(TOTAL_STEALS + 4):
         if not has(at, "button", BTN_STEAL):
@@ -258,7 +278,9 @@ class AppSquadTest(unittest.TestCase):
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertEqual(len(find(at, "selectbox", SEL_TARGET).options), SQUAD_SIZE)
         self.assertEqual(len(find(at, "selectbox", SEL_GIVE).options), SQUAD_SIZE)
-        self.assertTrue(any("Yedek" in o for o in find(at, "selectbox", SEL_TARGET).options))
+        # Uygulama yedekleri küçük harfle "[yedek]" olarak etiketler; büyük/küçük harf duyarsız ara.
+        target_opts = find(at, "selectbox", SEL_TARGET).options
+        self.assertEqual(sum("yedek" in o.lower() for o in target_opts), BENCH_SIZE)
 
     def test_protect_selector_lists_all_nineteen_players(self):
         at = setup_two_sides(start_app())
@@ -290,9 +312,7 @@ class AppArrangeSwapTest(unittest.TestCase):
         bench_pid = bench_ids(at, turn)[0]
 
         self.assertIn(HDR_LAYOUT, all_text(at))
-        find(at, "selectbox", SEL_SLOT).set_value(slot_pid).run()
-        find(at, "selectbox", SEL_BENCH).set_value(bench_pid).run()
-        find(at, "button", BTN_SWAP).click().run()
+        swap_by_index(at, 0, 0)
 
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertEqual(squad_ids(at, turn)[0], bench_pid)
@@ -304,14 +324,16 @@ class AppArrangeSwapTest(unittest.TestCase):
         turn = at.session_state["state"]["turn"]
         slots = squad_players(at, turn)
         bench = bench_players(at, turn)
-        pair = next(((s, b) for s in slots for b in bench
+        pair = next(((si, bi) for si, s in enumerate(slots) for bi, b in enumerate(bench)
                      if s["pos"] != b["pos"] and s["pos"] not in b.get("alt", [])), None)
         if pair is None:
             self.skipTest("uyumsuz pozisyonlu yedek-ilk11 çifti yok")
-        slot_p, bench_p = pair
-        find(at, "selectbox", SEL_SLOT).set_value(slot_p["id"]).run()
-        find(at, "selectbox", SEL_BENCH).set_value(bench_p["id"]).run()
-        self.assertGreater(len(at.warning), 0, "pozisyon uyumsuzluğunda uyarı bekleniyordu")
+        slot_idx, bench_idx = pair
+        find(at, "selectbox", SEL_SLOT).set_value(slot_idx).run()
+        find(at, "selectbox", SEL_BENCH).set_value(bench_idx).run()
+        # Sayfada her zaman bulunan uyarılardan ayırmak için uyumsuzluk metnine bak.
+        self.assertTrue(any("Uyumsuz" in w.value for w in at.warning),
+                        [w.value for w in at.warning])
 
 
 
@@ -355,22 +377,16 @@ class AppArrangeAndResultTest(unittest.TestCase):
         at = setup_two_sides(start_app())
         self.play_until_arrange(at)
         side = "A"
-        slot_pid = squad_ids(at, side)[1]
         bench_pid = bench_ids(at, side)[1]
-        find(at, "selectbox", SEL_SLOT).set_value(slot_pid).run()
-        find(at, "selectbox", SEL_BENCH).set_value(bench_pid).run()
-        find(at, "button", BTN_SWAP).click().run()
+        swap_by_index(at, 1, 1)
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertEqual(squad_ids(at, side)[1], bench_pid)
 
         find(at, "button", BTN_CONFIRM_ARRANGE).click().run()
         self.assertEqual(at.session_state["state"]["arranged"], {"A": True, "B": False})
         side = "B"
-        slot_pid = squad_ids(at, side)[2]
         bench_pid = bench_ids(at, side)[2]
-        find(at, "selectbox", SEL_SLOT).set_value(slot_pid).run()
-        find(at, "selectbox", SEL_BENCH).set_value(bench_pid).run()
-        find(at, "button", BTN_SWAP).click().run()
+        swap_by_index(at, 2, 2)
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertEqual(squad_ids(at, side)[2], bench_pid)
 

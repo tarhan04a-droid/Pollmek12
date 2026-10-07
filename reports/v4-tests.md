@@ -35,3 +35,5 @@ Sözleşmede adı geçmeyen etiketler test sabitlerinde bu isimlerle tanımland�
 
 ## Commit
 - `4e40f91`'den sonra: `b8a388f` (test_engine), `c7d8473` (test_app).
+- Not (test düzeltmesi): test_app.py 5 hatası giderildi; selectbox indeksleri (`SEL_SLOT`/`SEL_BENCH`) indeksle, takas seçimleri id ile yapılıyor, yedek araması büyük/küçük harf duyarsız; `play_full_match` önce takas turlarını başlatıyor.
+- Sonuç: `python3 -m unittest discover -s tests -p "test_*.py"` 108/108 geçiyor (app.py ve engine.py değiştirilmedi).
