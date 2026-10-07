@@ -88,3 +88,28 @@ Mevcut 4 formasyona ek olarak en az şunlar eklenir: 4-1-4-1, 4-5-1, 5-3-2, 3-4-
 
 ## Dosya sahipliği (Güncelleme 2)
 v2-engine: `engine.py` | v2-app: `app.py` | v2-data: `data/formations.json`, `data/build_data.py` (yalnızca formasyon kısmı), `docs/data-notes.md` | v2-tests: `tests/test_engine.py`, `tests/test_app.py`
+
+---
+# Güncelleme 3 (Streamlit): koruma takas turunun içinde
+Bu bölüm önceki bölümlerin koruma ile ilgili maddelerini geçersiz kılar (ayrı bir "koruma aşaması" yok; takasta alınan oyuncu artık otomatik korumalı olmaz).
+
+## Kural
+- Maç, iki taraf da hiç korumasız başlar. Ayrı koruma aşaması yoktur: `phase` yalnızca `"steal"` ve `"done"`.
+- Sıra A, B, A, B… Her sıra iki adımdır: (1) **takas**: rakipten korumasız birini al, kendi korumasız oyuncunla değiştir; (2) **koruma**: oyuncuların arasından (yeni aldığın dahil) en fazla `protect_count` (3) oyuncuyu korumalı olarak belirle; bu liste önceki korumanı tamamen değiştirir (3 doluysa birini bırakıp yenisini seçebilirsin; boş bırakmak da serbest).
+- Korumalı oyuncu rakip tarafından alınamaz ve sahibi tarafından verilemez (kendi korumalısı takasta verilemez; önce korumayı değiştirmen gerekir).
+- Son takastan sonra (iki tarafın `steals_left` değeri 0) koruma adımı atlanır, maç biter.
+
+## Motor (`engine.py`)
+- `create_match(...)` imzası aynı; state: `phase="steal"`, `step="steal"`, `turn="A"`, `sides[X].protected_ids=[]`; `protect_count` aynı.
+- `steal(state, side, target_id, give_id)`: yalnızca `phase=="steal"`, `step=="steal"`, `turn==side`. `target_id` rakipte ve korumasız; `give_id` kendi kadroda ve korumasız. İki oyuncu slotlarını değiştirir. **Otomatik koruma eklenmez.** `steals_left[side]` azalır. İkisi de 0 ise `phase="done"`; değilse `step="protect"` (sıra aynı tarafta kalır).
+- `protect(state, side, player_ids)`: yalnızca `phase=="steal"`, `step=="protect"`, `turn==side`. En fazla `protect_count` id, tekrarsız, hepsi kendi kadrosunda; `protected_ids` bu listeyle değiştirilir. Sonra `turn` rakibe geçer, `step="steal"`.
+- `slot_score`, `team_rating`, `result` aynı.
+- Aynı seed + aynı hamleler -> aynı sonuç.
+
+## Uygulama (`app.py`)
+- Kurulumdan sonra (kadro ekranı) doğrudan takas ekranı başlar; "Koruma aşamasına geç" ve ayrı koruma ekranı kalkar. Kadro ekranındaki buton "Takas turlarını başlat" olur.
+- Takas ekranı sıra sahibine göre iki adımlıdır: önce "Takas" (rakipten korumasız al, kendinden korumasız ver; korumalılar listede devre dışı ve etiketli), takas yapılınca aynı ekranda "Koruma": kendi 11 oyuncun (yeni alınan "yeni" etiketli) içinden en fazla 3 seçip "Korumayı onayla"; seçimsiz de onaylanabilir ("Koruma yapma" ayrı bir seçim gerekmez, boş onay yeter). Sıra bilgisi ve kalan takas hakkı görünür; mevcut korumalar önceden seçili gelir.
+- Son takastan sonra koruma adımı gösterilmeden sonuç ekranına geçilir.
+
+## Dosya sahipliği (Güncelleme 3)
+v3-engine: `engine.py` | v3-app: `app.py` | v3-tests: `tests/test_engine.py`, `tests/test_app.py`
