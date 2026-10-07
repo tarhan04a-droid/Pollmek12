@@ -2,7 +2,7 @@
 
 Çalıştırma: streamlit run app.py
 Oyun kuralları engine.py içinde; bu dosya yalnızca arayüzü yönetir.
-Sözleşme: docs/CONTRACT.md > "Güncelleme 4 > Uygulama".
+Sözleşme: docs/CONTRACT.md > "Güncelleme 6 > Uygulama".
 """
 
 import json
@@ -19,6 +19,7 @@ from engine import (
     slot_score,
     steal,
     swap_bench,
+    swap_reserve,
     team_rating,
 )
 
@@ -26,10 +27,13 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 TYPE_LABELS = {"club": "Kulüp", "league": "Lig", "nation": "Ülke"}
 PROTECT_COUNT = 3
 STEALS_PER_SIDE = 3
-BENCH_SIZE = 4
+BENCH_SIZE = 8
+RESERVE_SIZE = 4
 MAX_CATEGORIES = 4  # her oyuncu için toplam üst sınır
 SIDE_ORDER = ("A", "B")
 OTHER = {"A": "B", "B": "A"}
+TAG_BENCH = "yedek"
+TAG_RESERVE = "rezerv"
 # Sıfırlamada silinecek widget anahtarı önekleri (yeni maçta eski seçimler kalmasın).
 WIDGET_PREFIXES = ("A_", "B_", "target_", "give_", "protect_", "sw_")
 
@@ -50,18 +54,23 @@ PLAYERS_BY_ID = {p["id"]: p for p in PLAYERS}
 FORMATIONS_BY_ID = {f["id"]: f for f in FORMATIONS}
 
 
-def label(p, protected=False, bench=False):
+def label(p, protected=False, tag=None):
+    """Oyuncu etiketi. tag: None (ilk 11), TAG_BENCH veya TAG_RESERVE."""
     text = f"{p['name']} · {p['pos']} · {p['rating']}"
-    if bench:
-        text += " [yedek]"
+    if tag:
+        text += f" [{tag}]"
     if protected:
         text += " [korumalı]"
     return text
 
 
 def roster(side):
-    """Tarafın tüm oyuncuları: önce ilk 11 (bench=False), sonra yedekler (bench=True)."""
-    return [(s["player"], False) for s in side["slots"]] + [(p, True) for p in side["bench"]]
+    """Tarafın tüm oyuncuları: ilk 11 (tag None), yedekler (TAG_BENCH), rezervler (TAG_RESERVE)."""
+    return (
+        [(s["player"], None) for s in side["slots"]]
+        + [(p, TAG_BENCH) for p in side["bench"]]
+        + [(p, TAG_RESERVE) for p in side["reserves"]]
+    )
 
 
 def pool_size(chosen):
@@ -80,7 +89,8 @@ def reset_match():
             st.session_state.pop(key, None)
 
 
-def render_squad(side_name, side, formation_id):
+def render_squad(side_name, state, formation_id):
+    side = state["sides"][side_name]
     st.subheader(f"Oyuncu {side_name} · {formation_id}")
     for slot in side["slots"]:
         p = slot["player"]
@@ -88,6 +98,13 @@ def render_squad(side_name, side, formation_id):
     st.markdown("**Yedekler**")
     for p in side["bench"]:
         st.write(label(p))
+    st.markdown("**Rezervler**")
+    for p in side["reserves"]:
+        st.write(label(p))
+    st.caption(
+        f"Takım puanı: {team_rating(state, side_name)} "
+        "(ilk 11 + yedekler ortalaması; rezervler puana dahil değil)"
+    )
 
 
 # ---------------------------------------------------------------- kurulum
@@ -118,6 +135,7 @@ def start_match(setup):
             protect_count=PROTECT_COUNT,
             steals_per_side=STEALS_PER_SIDE,
             bench_size=BENCH_SIZE,
+            reserve_size=RESERVE_SIZE,
             seed=seed,
         )
     except ValueError as e:
@@ -204,9 +222,9 @@ def screen_squads():
     st.title("Kadrolar")
     col_a, col_b = st.columns(2)
     with col_a:
-        render_squad("A", state["sides"]["A"], setups["A"]["formation_id"])
+        render_squad("A", state, setups["A"]["formation_id"])
     with col_b:
-        render_squad("B", state["sides"]["B"], setups["B"]["formation_id"])
+        render_squad("B", state, setups["B"]["formation_id"])
 
     if st.button("Takas turlarını başlat", type="primary"):
         st.session_state.stage = "play"
@@ -216,45 +234,69 @@ def screen_squads():
         st.rerun()
 
 
-# ---------------------------------------------------------------- kadro düzeni (yedek yerleştirme)
+# ---------------------------------------------------------------- kadro düzeni (yer değiştirme)
 def render_arrange_controls(state, side):
-    """Tarafın ilk 11'indeki bir oyuncuyu bir yedekle yer değiştirme bölümü."""
+    """Tarafın iki yer değiştirme aracı: ilk 11 <-> yedek (swap_bench) ve yedek <-> rezerv (swap_reserve)."""
     me = state["sides"][side]
     bench = me["bench"]
-    if not bench:
+    reserves = me["reserves"]
+    if not bench and not reserves:
         return
     prot = set(me["protected_ids"])
     st.markdown("**Kadro düzeni**")
     st.caption(
-        "İlk 11'den bir oyuncuyu yedeğiyle yer değiştirin. "
-        "Pozisyon uyumsuzsa puandan 10 düşülür."
+        "İlk 11 ile yedek, yedek ile rezerv yer değiştirilebilir. "
+        "İlk 11 ile rezerv doğrudan yer değiştiremez. Pozisyon uyumsuzsa puandan 10 düşülür."
     )
-    slot_idx = st.selectbox(
-        "İlk 11'den oyuncu",
-        options=list(range(len(me["slots"]))),
-        format_func=lambda i: (
-            f"{me['slots'][i]['pos']} — "
-            f"{label(me['slots'][i]['player'], me['slots'][i]['player']['id'] in prot)}"
-        ),
-        key=f"sw_slot_{side}",
-    )
-    bench_idx = st.selectbox(
-        "Yedekten oyuncu",
-        options=list(range(len(bench))),
-        format_func=lambda i: label(bench[i], bench[i]["id"] in prot, bench=True),
-        key=f"sw_bench_{side}",
-    )
-    slot_pos = me["slots"][slot_idx]["pos"]
-    cand = bench[bench_idx]
-    if slot_score(slot_pos, cand) < cand["rating"]:
-        st.warning(f"Uyumsuz: {cand['name']} {slot_pos} slotunda puandan 10 düşük sayılır.")
-    if st.button("Yer değiştir", key=f"sw_btn_{side}"):
-        try:
-            st.session_state.state = swap_bench(state, side, slot_idx, bench_idx)
-        except ValueError as e:
-            st.error(str(e))
-            return
-        st.rerun()
+
+    if bench:
+        slot_idx = st.selectbox(
+            "İlk 11'den oyuncu",
+            options=list(range(len(me["slots"]))),
+            format_func=lambda i: (
+                f"{me['slots'][i]['pos']} — "
+                f"{label(me['slots'][i]['player'], me['slots'][i]['player']['id'] in prot)}"
+            ),
+            key=f"sw_slot_{side}",
+        )
+        bench_idx = st.selectbox(
+            "Yedekten oyuncu",
+            options=list(range(len(bench))),
+            format_func=lambda i: label(bench[i], bench[i]["id"] in prot, TAG_BENCH),
+            key=f"sw_bench_{side}",
+        )
+        slot_pos = me["slots"][slot_idx]["pos"]
+        cand = bench[bench_idx]
+        if slot_score(slot_pos, cand) < cand["rating"]:
+            st.warning(f"Uyumsuz: {cand['name']} {slot_pos} slotunda puandan 10 düşük sayılır.")
+        if st.button("Yer değiştir", key=f"sw_btn_{side}"):
+            try:
+                st.session_state.state = swap_bench(state, side, slot_idx, bench_idx)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            st.rerun()
+
+    if bench and reserves:
+        rbench_idx = st.selectbox(
+            "Yedekten oyuncu",
+            options=list(range(len(bench))),
+            format_func=lambda i: label(bench[i], bench[i]["id"] in prot, TAG_BENCH),
+            key=f"sw_rbench_{side}",
+        )
+        reserve_idx = st.selectbox(
+            "Rezervden oyuncu",
+            options=list(range(len(reserves))),
+            format_func=lambda i: label(reserves[i], reserves[i]["id"] in prot, TAG_RESERVE),
+            key=f"sw_res_{side}",
+        )
+        if st.button("Rezervle yer değiştir", key=f"sw_rbtn_{side}"):
+            try:
+                st.session_state.state = swap_reserve(state, side, rbench_idx, reserve_idx)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            st.rerun()
 
 
 # ---------------------------------------------------------------- takas (takas + koruma)
@@ -284,14 +326,14 @@ def screen_steal_step(state, turn, other, left):
 
     rival_roster = roster(rival)
     my_roster = roster(me)
-    target_names = {p["id"]: label(p, p["id"] in rival_prot, b) for p, b in rival_roster}
-    give_names = {p["id"]: label(p, p["id"] in my_prot, b) for p, b in my_roster}
+    target_names = {p["id"]: label(p, p["id"] in rival_prot, tag) for p, tag in rival_roster}
+    give_names = {p["id"]: label(p, p["id"] in my_prot, tag) for p, tag in my_roster}
     target_opts = [p["id"] for p, _ in rival_roster if p["id"] not in rival_prot]
     give_opts = [p["id"] for p, _ in my_roster if p["id"] not in my_prot]
 
-    with st.expander("Rakip kadrosu (yedekler ve korumalılar işaretli)"):
-        for p, b in rival_roster:
-            st.write(label(p, p["id"] in rival_prot, b))
+    with st.expander("Rakip kadrosu (yedekler, rezervler ve korumalılar işaretli)"):
+        for p, tag in rival_roster:
+            st.write(label(p, p["id"] in rival_prot, tag))
 
     if not target_opts or not give_opts:
         st.error("Takas için uygun oyuncu kalmadı. Maç ilerlemiyor.")
@@ -322,7 +364,7 @@ def screen_steal_step(state, turn, other, left):
 def screen_protect_step(state, turn):
     st.markdown("**Adım 2/2: Koruma**")
     st.caption(
-        f"Kadronuzdan (ilk 11 ve yedekler) en fazla {PROTECT_COUNT} oyuncu koruyun; "
+        f"Kadronuzdan (ilk 11, yedekler ve rezervler) en fazla {PROTECT_COUNT} oyuncu koruyun; "
         "boş onay da serbest. Seçim öncekinin yerine geçer."
     )
     squad = roster(state["sides"][turn])
@@ -330,8 +372,8 @@ def screen_protect_step(state, turn):
     new_id = st.session_state.get("new_id")
     options = [p["id"] for p, _ in squad]
     names = {
-        p["id"]: label(p, p["id"] in current, b) + (" [yeni]" if p["id"] == new_id else "")
-        for p, b in squad
+        p["id"]: label(p, p["id"] in current, tag) + (" [yeni]" if p["id"] == new_id else "")
+        for p, tag in squad
     }
     ids = st.multiselect(
         "Korunacak oyuncular",
@@ -360,7 +402,7 @@ def screen_arrange(state):
     if state["arranged"][OTHER[side]]:
         st.info(f"Oyuncu {OTHER[side]} düzenini onayladı.")
     st.warning(f"Ekranı sadece Oyuncu {side} görsün.")
-    render_squad(side, state["sides"][side], state["setups"][side]["formation_id"])
+    render_squad(side, state, state["setups"][side]["formation_id"])
     render_arrange_controls(state, side)
     if st.button("Düzeni onayla", type="primary"):
         try:
@@ -383,6 +425,12 @@ def screen_done(state):
         st.success("Berabere!")
     else:
         st.success(f"Oyuncu {res['winner']} kazandı!")
+    first = state["sides"]["A"]
+    st.caption(
+        f"Takım puanı, ilk {len(first['slots'])} ve {len(first['bench'])} yedeğin ortalamasıdır "
+        f"({len(first['slots']) + len(first['bench'])} oyuncu). "
+        f"{len(first['reserves'])} rezerv puana dahil değildir."
+    )
     with st.expander("Son kadrolar"):
         for side in SIDE_ORDER:
             st.markdown(
@@ -392,8 +440,11 @@ def screen_done(state):
             for slot in state["sides"][side]["slots"]:
                 p = slot["player"]
                 st.write(f"{slot['pos']} — {p['name']} ({p['rating']})")
-            st.markdown("Yedekler:")
+            st.markdown("Yedekler (puana dahil):")
             for p in state["sides"][side]["bench"]:
+                st.write(label(p))
+            st.markdown("Rezervler (puana dahil değil):")
+            for p in state["sides"][side]["reserves"]:
                 st.write(label(p))
     if st.button("Yeni maç", type="primary"):
         reset_match()
