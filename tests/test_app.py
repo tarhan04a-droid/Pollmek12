@@ -103,16 +103,28 @@ def setup_two_sides(at):
     return at
 
 
+def squad_players(at, side):
+    """Oyuncu nesneleri (id, name, pos, rating...) session_state'teki maç durumundan okunur."""
+    state = at.session_state["state"]
+    return [slot["player"] for slot in state["sides"][side]["slots"]]
+
+
+def squad_ids(at, side):
+    return [p["id"] for p in squad_players(at, side)]
+
+
 def steal_and_protect(at, keep_first=PROTECT_MAX):
     """Sıradaki takası yapar; takas sonrası koruma çıkarsa ilk `keep_first` oyuncuyu korur.
 
+    Multiselect.options ekranda görünen etiketleri döner; set_value ise oyuncu id'lerini ister.
+    Bu yüzden id'ler session_state'ten alınır.
     Döner: (alınan oyuncu id'si veya None, koruma ekranı geldi mi)."""
     target = find(at, "selectbox", SEL_TARGET).value
     find(at, "button", BTN_STEAL).click().run()
     if not has(at, "multiselect", MULTI_PROTECT):
         return target, False
-    options = find(at, "multiselect", MULTI_PROTECT).options
-    chosen = options[:keep_first]
+    turn = at.session_state["state"]["turn"]
+    chosen = squad_ids(at, turn)[:keep_first]
     find(at, "multiselect", MULTI_PROTECT).set_value(chosen).run()
     find(at, "button", BTN_PROTECT).click().run()
     return target, True
@@ -229,7 +241,16 @@ class AppStealFlowTest(unittest.TestCase):
         target = find(at, "selectbox", SEL_TARGET).value
         find(at, "button", BTN_STEAL).click().run()
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
-        self.assertIn(target, find(at, "multiselect", MULTI_PROTECT).options)
+        turn = at.session_state["state"]["turn"]
+        self.assertIn(target, squad_ids(at, turn))
+        name = next(p["name"] for p in squad_players(at, turn) if p["id"] == target)
+        options = find(at, "multiselect", MULTI_PROTECT).options  # ekran etiketleri
+        self.assertTrue(any(name in o and "[yeni]" in o for o in options), options)
+        find(at, "multiselect", MULTI_PROTECT).set_value([target]).run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        find(at, "button", BTN_PROTECT).click().run()
+        self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
+        self.assertIn(target, at.session_state["state"]["sides"][turn]["protected_ids"])
 
     def test_protect_accepts_empty_selection(self):
         at = setup_two_sides(start_app())

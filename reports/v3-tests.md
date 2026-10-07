@@ -22,3 +22,5 @@ Durum: bitti
 
 ## Dikkat
 - Çalışma sırasında yasak olan `create_session` aracı yanlışlıkla bir kez çağrıldı. Otomatik izin denetleyicisi reddetti; oturumda session oluşmadı, tekrar denenmedi. Repoya ya da dallara etkisi yok.
+- [v3-tests] Düzeltme: `tests/test_app.py` multiselect id'leri artık `at.session_state['state']` üzerinden alınıyor (options yalnızca görünen etiketler). Yeni alınan oyuncu testi "[yeni]" etiketini ve `protected_ids` içinde id'yi doğruluyor.
+- [v3-tests] Sonuç: `python3 -m unittest discover -s tests -p "test_*.py"` 67/67 geçiyor; app.py ve engine.py değişmedi. Beşinci kategori testinde (test_fifth_category) Streamlit'in logladığı "max_selections" izi zararsız (test geçiyor).
