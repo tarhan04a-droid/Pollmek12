@@ -26,7 +26,7 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 TYPE_LABELS = {"club": "Kulüp", "league": "Lig", "nation": "Ülke"}
 PROTECT_COUNT = 3
 STEALS_PER_SIDE = 3
-BENCH_SIZE = 8
+BENCH_SIZE = 4
 MAX_CATEGORIES = 4  # her oyuncu için toplam üst sınır
 SIDE_ORDER = ("A", "B")
 OTHER = {"A": "B", "B": "A"}
@@ -60,7 +60,7 @@ def label(p, protected=False, bench=False):
 
 
 def roster(side):
-    """Tarafın 19 oyuncusu: önce ilk 11 (bench=False), sonra yedekler (bench=True)."""
+    """Tarafın tüm oyuncuları: önce ilk 11 (bench=False), sonra yedekler (bench=True)."""
     return [(s["player"], False) for s in side["slots"]] + [(p, True) for p in side["bench"]]
 
 
