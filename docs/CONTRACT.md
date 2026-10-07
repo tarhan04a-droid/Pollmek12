@@ -35,3 +35,26 @@ Motoru `import { createMatch, protect, steal, teamRating, result } from './engin
 
 ## Dosya sahipliği
 w1: `data/**` (ham CSV dahil), `docs/data-notes.md` | w2: `src/engine.js` | w3: `index.html`, `src/ui.js`, `styles.css` | w4: `tests/**`
+
+---
+# Streamlit sürümü (yeni; JS sürümüyle aynı oyun kuralları, aynı veri dosyaları)
+Veri: `data/players.json`, `data/categories.json`, `data/formations.json` aynen kullanılır. Kural ve akış yukarıdaki gibi (kategori -> dağıtım -> koruma -> takas -> sonuç). JS dosyaları (`src/`, `index.html`) değişmez.
+
+## Motor (`engine.py`, saf Python, standart kütüphane, Streamlit'e bağımlı değil)
+State düz `dict`; her fonksiyon girdiyi değiştirmez (`copy.deepcopy`), hata durumunda `ValueError` fırlatır. Anahtarlar snake_case:
+- `create_match(players, categories, formation, protect_count=3, steals_per_side=3, seed=1)` -> state
+  - `categories`: `[{"type": "club"|"league"|"nation", "value": str}]`; `formation`: `{"id","slots":[...]}`
+  - state: `{"phase": "protect"|"steal"|"done", "sides": {"A": side, "B": side}, "turn": "A"|"B", "steals_left": {"A": n, "B": n}, "protect_count": n}`; `side = {"slots": [{"pos": str, "player": dict}], "protected_ids": [str]}`
+  - Dağıtım: havuz = kategorilerden herhangi birine uyan oyuncular; her iki tarafa her slot için tekrarsız, rastgele (`random.Random(seed)`) oyuncu; önce `pos == slot`, yetmezse `alt` içinde slot olanlar; yetmezse `ValueError`. İki tarafta aynı oyuncu olmaz.
+- `protect(state, side, player_ids)`: tam `protect_count` id, hepsi o tarafın kadrosunda; iki taraf da koruyunca `phase="steal"`, `turn="A"`.
+- `steal(state, side, target_id, give_id)`: yalnızca `phase=="steal"` ve `turn==side`; `target_id` rakipte ve korumasız; `give_id` kendi kadroda ve kendi korumalısı değil; iki oyuncu birbirinin slotuna geçer; `target_id` thief'in `protected_ids`'ine eklenir; sıra değişir, `steals_left[side]` azalır; ikisi de 0 olunca `phase="done"`.
+- `slot_score(slot_pos, player)`: `pos == slot_pos` veya `slot_pos in alt` ise `rating`, değilse `max(0, rating - 10)`.
+- `team_rating(state, side)`: 11 slotun `slot_score` ortalaması, `round()` ile tam sayı.
+- `result(state)`: `{"A": int, "B": int, "winner": "A"|"B"|"draw"}`; yalnızca `phase=="done"`.
+- Aynı seed + aynı hamleler -> aynı sonuç.
+
+## Uygulama (`app.py`, `requirements.txt`)
+`streamlit run app.py`. `engine.py`'yi import eder, motoru kopyalamaz. Veri `@st.cache_data` ile `data/*.json`'dan yüklenir. Durum `st.session_state`'te. Hot-seat. Ekranlar: kurulum (kategori türü seç, arama, çoklu seçim, formasyon; varsayılan ilk formasyon) -> kadrolar -> koruma (A sonra B, tam 3 seçim) -> takas turları (rakipten korumasız al, kendinden korumasız ver; korumalılar listede devre dışı/etiketli) -> sonuç ve "Yeni maç". `requirements.txt`: yalnızca `streamlit`. Telefonda da rahat okunmalı (`st.columns` az, uzun listeler `st.selectbox`/`st.multiselect`).
+
+## Dosya sahipliği (Streamlit)
+st-engine: `engine.py` | st-app: `app.py`, `requirements.txt`, `.streamlit/**` | st-tests: `tests/test_engine.py`, `tests/test_app.py`
