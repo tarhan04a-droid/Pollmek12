@@ -1,8 +1,8 @@
 """Rastgele Seçimli Maç motoru (Python). Saf fonksiyonlar, yalnızca standart kütüphane.
 
-Sözleşme: docs/CONTRACT.md > "Güncelleme 4" > Motor (8 yedek oyuncu).
+Sözleşme: docs/CONTRACT.md > "Güncelleme 5" > Motor (4 yedek, kalite penceresi).
 Her oyuncu kendi kategorilerini ve formasyonunu seçer; iki taraf farklı havuzlardan dağıtılır.
-Her taraf ilk 11 + bench_size yedek alır. Takas ilk 11 ve yedekleri kapsar.
+Her taraf ilk 11 + bench_size (varsayılan 4) yedek alır. Takas ilk 11 ve yedekleri kapsar.
 Fazlar: "steal" (sıra A, B, A, B...; her takastan sonra koruma adımı, step: "steal" -> "protect"),
 "arrange" (son takastan sonra iki taraf düzenini yapıp onaylar), "done" (sonuç).
 State düz dict; hiçbir fonksiyon girdiyi değiştirmez (copy.deepcopy). Hata = ValueError.
@@ -18,6 +18,8 @@ MAX_CATEGORIES = 4
 FORMATION_SLOTS = 11
 ALT_PENALTY = 10
 MAX_DEAL_ATTEMPTS = 50
+DEFAULT_BENCH_SIZE = 4
+DEFAULT_QUALITY_WINDOW = 10
 
 
 def _fail(message):
@@ -107,7 +109,35 @@ def _deal_order(slot_lists, bench_size):
     return order
 
 
-def _try_deal(pools, slot_lists, order, rng):
+def _pick_slot(free, pos, rng, quality_window):
+    """Slot için oyuncu seçer. Aday kümesi: önce pos == slot, yoksa alt'ta slot olanlar.
+    quality_window None ise (eski davranış) kümenin ilk elemanı; değilse en iyi
+    puandan en fazla quality_window geride olanlar arasından seed'li rastgele."""
+    cands = [p for p in free if p["pos"] == pos]
+    if not cands:
+        cands = [p for p in free if pos in (p.get("alt") or [])]
+    if not cands:
+        return None
+    if quality_window is None:
+        return cands[0]
+    best = max(p["rating"] for p in cands)
+    eligible = [p for p in cands if p["rating"] >= best - quality_window]
+    return rng.choice(eligible)
+
+
+def _pick_bench(free, rng, quality_window):
+    """Yedek için oyuncu seçer. Her aday, kendi birincil pozisyonundaki kalan en iyi
+    oyuncuya göre değerlendirilir; en fazla quality_window geride olanlar adaydır."""
+    if quality_window is None:
+        return free[0]
+    best_at = {}
+    for p in free:
+        best_at[p["pos"]] = max(best_at.get(p["pos"], p["rating"]), p["rating"])
+    eligible = [p for p in free if p["rating"] >= best_at[p["pos"]] - quality_window]
+    return rng.choice(eligible)
+
+
+def _try_deal(pools, slot_lists, order, rng, quality_window):
     """Bir deneme. Başarısızsa (False, taraf, etiket, None) döner; yedekte etiket None."""
     shuffled = {side: rng.sample(pools[side], len(pools[side])) for side in SIDES}
     used = set()
@@ -117,14 +147,12 @@ def _try_deal(pools, slot_lists, order, rng):
         if index is None:
             if not free:
                 return False, side, None, None
-            pick = free[0]
+            pick = _pick_bench(free, rng, quality_window)
             used.add(pick["id"])
             dealt[side]["bench"].append(copy.deepcopy(pick))
             continue
         pos = slot_lists[side][index]
-        pick = next((p for p in free if p["pos"] == pos), None)
-        if pick is None:
-            pick = next((p for p in free if pos in (p.get("alt") or [])), None)
+        pick = _pick_slot(free, pos, rng, quality_window)
         if pick is None:
             return False, side, pos, None
         used.add(pick["id"])
@@ -132,14 +160,14 @@ def _try_deal(pools, slot_lists, order, rng):
     return True, None, None, dealt
 
 
-def _deal_sides(pools, slot_lists, bench_size, seed):
+def _deal_sides(pools, slot_lists, bench_size, seed, quality_window):
     """İki tarafı çakışmasız dağıtır. Tıkanırsa seed'den türetilen yeni karıştırmayla
     en fazla MAX_DEAL_ATTEMPTS kez dener; hâlâ olmazsa ValueError."""
     order = _deal_order(slot_lists, bench_size)
     failure = None
     for attempt in range(MAX_DEAL_ATTEMPTS):
         rng = random.Random(seed) if attempt == 0 else random.Random(f"{seed}:{attempt}")
-        ok, side, label, dealt = _try_deal(pools, slot_lists, order, rng)
+        ok, side, label, dealt = _try_deal(pools, slot_lists, order, rng, quality_window)
         if ok:
             return dealt
         failure = (side, label)
@@ -181,7 +209,15 @@ def _put_at(side_state, loc, player):
         side_state["slots"][index]["player"] = player
 
 
-def create_match(players, setups, protect_count=3, steals_per_side=3, bench_size=8, seed=1):
+def create_match(
+    players,
+    setups,
+    protect_count=3,
+    steals_per_side=3,
+    bench_size=DEFAULT_BENCH_SIZE,
+    seed=1,
+    quality_window=DEFAULT_QUALITY_WINDOW,
+):
     if not isinstance(players, list) or len(players) == 0:
         _fail("Oyuncu listesi boş")
     if not isinstance(setups, dict) or set(setups.keys()) != set(SIDES):
@@ -193,6 +229,8 @@ def create_match(players, setups, protect_count=3, steals_per_side=3, bench_size
     slot_count = min(len(slot_lists[side]) for side in SIDES)
     if not _is_int(bench_size) or bench_size < 0:
         _fail(f"Geçersiz bench_size: {bench_size} (0 veya büyük tam sayı olmalı)")
+    if quality_window is not None and (not _is_int(quality_window) or quality_window < 0):
+        _fail(f"Geçersiz quality_window: {quality_window} (None veya 0 ve üzeri tam sayı olmalı)")
     roster_size = slot_count + bench_size
     if not _is_int(protect_count) or protect_count < 0 or protect_count > roster_size:
         _fail(f"Geçersiz protect_count: {protect_count} (0..{roster_size} tam sayı olmalı)")
@@ -210,7 +248,7 @@ def create_match(players, setups, protect_count=3, steals_per_side=3, bench_size
                 f"gerekli, bulunan {len(pools[side])})"
             )
 
-    dealt = _deal_sides(pools, slot_lists, bench_size, seed)
+    dealt = _deal_sides(pools, slot_lists, bench_size, seed, quality_window)
 
     state = {
         # Takas yoksa (steals_per_side == 0) da düzen onayı yapılır; sonra sonuç.
