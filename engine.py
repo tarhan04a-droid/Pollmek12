@@ -1,8 +1,9 @@
 """Rastgele Seçimli Maç motoru (Python). Saf fonksiyonlar, yalnızca standart kütüphane.
 
-Sözleşme: docs/CONTRACT.md > "Güncelleme 5" > Motor (4 yedek, kalite penceresi).
+Sözleşme: docs/CONTRACT.md > "Güncelleme 6" > Motor (8 yedek + 4 rezerv, yedekler puana dahil).
 Her oyuncu kendi kategorilerini ve formasyonunu seçer; iki taraf farklı havuzlardan dağıtılır.
-Her taraf ilk 11 + bench_size (varsayılan 4) yedek alır. Takas ilk 11 ve yedekleri kapsar.
+Her taraf ilk 11 + bench_size (varsayılan 8) yedek + reserve_size (varsayılan 4) rezerv alır.
+Takas ilk 11, yedek ve rezervleri kapsar. Takım puanı ilk 11 + yedekler (19 oyuncu); rezervler puana girmez.
 Fazlar: "steal" (sıra A, B, A, B...; her takastan sonra koruma adımı, step: "steal" -> "protect"),
 "arrange" (son takastan sonra iki taraf düzenini yapıp onaylar), "done" (sonuç).
 State düz dict; hiçbir fonksiyon girdiyi değiştirmez (copy.deepcopy). Hata = ValueError.
@@ -18,8 +19,10 @@ MAX_CATEGORIES = 4
 FORMATION_SLOTS = 11
 ALT_PENALTY = 10
 MAX_DEAL_ATTEMPTS = 50
-DEFAULT_BENCH_SIZE = 4
+DEFAULT_BENCH_SIZE = 8
+DEFAULT_RESERVE_SIZE = 4
 DEFAULT_QUALITY_WINDOW = 10
+GROUPS = ("slots", "bench", "reserves")
 
 
 def _fail(message):
@@ -94,18 +97,20 @@ def _build_pool(players, categories):
     return pool
 
 
-def _deal_order(slot_lists, bench_size):
+def _deal_order(slot_lists, bench_size, reserve_size):
     """Dağıtım sırası: önce ilk 11 (A slot1, B slot1, A slot2, ...), sonra yedekler
-    (A, B, A, B, ...). Yedek girdisi index None ile işaretlenir."""
+    (A, B, A, B, ...), sonra rezervler (A, B, A, B, ...). Girdi: (taraf, grup, indeks);
+    yedek ve rezerv girdilerinde indeks None."""
     order = []
     longest = max(len(slot_lists[side]) for side in SIDES)
     for i in range(longest):
         for side in SIDES:
             if i < len(slot_lists[side]):
-                order.append((side, i))
-    for _ in range(bench_size):
-        for side in SIDES:
-            order.append((side, None))
+                order.append((side, "slots", i))
+    for group, size in (("bench", bench_size), ("reserves", reserve_size)):
+        for _ in range(size):
+            for side in SIDES:
+                order.append((side, group, None))
     return order
 
 
@@ -164,78 +169,85 @@ def _pick_bench(free, rng, quality_window, start):
 
 
 def _try_deal(pools, starts, slot_lists, order, rng, quality_window):
-    """Bir deneme. Başarısızsa (False, taraf, etiket, None) döner; yedekte etiket None."""
+    """Bir deneme. Dönüş: (ok, taraf, grup, pozisyon, dağıtım). Başarısızsa dağıtım None,
+    pozisyon yalnızca ilk 11 slotunda doludur."""
     shuffled = {side: rng.sample(pools[side], len(pools[side])) for side in SIDES}
     used = set()
-    dealt = {side: {"slots": [], "bench": []} for side in SIDES}
-    for side, index in order:
+    dealt = {side: {group: [] for group in GROUPS} for side in SIDES}
+    for side, group, index in order:
         free = [p for p in shuffled[side] if p["id"] not in used]
-        if index is None:
-            if not free:
-                return False, side, None, None
-            pick = _pick_bench(free, rng, quality_window, starts[side])
+        if group == "slots":
+            pos = slot_lists[side][index]
+            pick = _pick_slot(free, pos, rng, quality_window, starts[side])
+            if pick is None:
+                return False, side, group, pos, None
             used.add(pick["id"])
-            dealt[side]["bench"].append(copy.deepcopy(pick))
+            dealt[side]["slots"].append({"pos": pos, "player": copy.deepcopy(pick)})
             continue
-        pos = slot_lists[side][index]
-        pick = _pick_slot(free, pos, rng, quality_window, starts[side])
-        if pick is None:
-            return False, side, pos, None
+        if not free:
+            return False, side, group, None, None
+        pick = _pick_bench(free, rng, quality_window, starts[side])
         used.add(pick["id"])
-        dealt[side]["slots"].append({"pos": pos, "player": copy.deepcopy(pick)})
-    return True, None, None, dealt
+        dealt[side][group].append(copy.deepcopy(pick))
+    return True, None, None, None, dealt
 
 
-def _deal_sides(pools, slot_lists, bench_size, seed, quality_window):
+def _deal_sides(pools, slot_lists, bench_size, reserve_size, seed, quality_window):
     """İki tarafı çakışmasız dağıtır. Tıkanırsa seed'den türetilen yeni karıştırmayla
     en fazla MAX_DEAL_ATTEMPTS kez dener; hâlâ olmazsa ValueError."""
-    order = _deal_order(slot_lists, bench_size)
+    order = _deal_order(slot_lists, bench_size, reserve_size)
     # Kalite penceresinin referansı: her tarafın kendi havuzunun başlangıç en iyileri
     # (ortak havuzda iki taraf aynı değerleri alır).
     starts = {side: _start_bests(pools[side]) for side in SIDES}
     failure = None
     for attempt in range(MAX_DEAL_ATTEMPTS):
         rng = random.Random(seed) if attempt == 0 else random.Random(f"{seed}:{attempt}")
-        ok, side, label, dealt = _try_deal(pools, starts, slot_lists, order, rng, quality_window)
+        ok, side, group, pos, dealt = _try_deal(
+            pools, starts, slot_lists, order, rng, quality_window
+        )
         if ok:
             return dealt
-        failure = (side, label)
-    side, label = failure
-    if label is None:
-        _fail(f"Havuz yetersiz: {side} tarafı için yedek oyuncu kalmadı")
-    _fail(f'Havuz yetersiz: {side} tarafının "{label}" slotu için uygun oyuncu kalmadı')
+        failure = (side, group, pos)
+    side, group, pos = failure
+    if group == "slots":
+        _fail(f'Havuz yetersiz: {side} tarafının "{pos}" slotu için uygun oyuncu kalmadı')
+    label = {"bench": "yedek", "reserves": "rezerv"}[group]
+    _fail(f"Havuz yetersiz: {side} tarafı için {label} oyuncu kalmadı")
 
 
 def _roster_ids(side_state):
+    """Tarafın 23 (ya da ayarlı sayıda) oyuncusunun id'leri: ilk 11, yedekler, rezervler."""
     return [slot["player"]["id"] for slot in side_state["slots"]] + [
-        p["id"] for p in side_state["bench"]
+        p["id"] for p in side_state["bench"] + side_state["reserves"]
     ]
 
 
 def _locate(side_state, player_id):
-    """Oyuncunun yerini ("slots", indeks) veya ("bench", indeks) olarak döner; yoksa None."""
+    """Oyuncunun yerini ("slots", indeks), ("bench", indeks) veya ("reserves", indeks)
+    olarak döner; yoksa None."""
     for i, slot in enumerate(side_state["slots"]):
         if slot["player"]["id"] == player_id:
             return ("slots", i)
-    for i, player in enumerate(side_state["bench"]):
-        if player["id"] == player_id:
-            return ("bench", i)
+    for group in ("bench", "reserves"):
+        for i, player in enumerate(side_state[group]):
+            if player["id"] == player_id:
+                return (group, i)
     return None
 
 
 def _get_at(side_state, loc):
     kind, index = loc
-    if kind == "bench":
-        return side_state["bench"][index]
-    return side_state["slots"][index]["player"]
+    if kind == "slots":
+        return side_state["slots"][index]["player"]
+    return side_state[kind][index]
 
 
 def _put_at(side_state, loc, player):
     kind, index = loc
-    if kind == "bench":
-        side_state["bench"][index] = player
-    else:
+    if kind == "slots":
         side_state["slots"][index]["player"] = player
+    else:
+        side_state[kind][index] = player
 
 
 def create_match(
@@ -244,6 +256,7 @@ def create_match(
     protect_count=3,
     steals_per_side=3,
     bench_size=DEFAULT_BENCH_SIZE,
+    reserve_size=DEFAULT_RESERVE_SIZE,
     seed=1,
     quality_window=DEFAULT_QUALITY_WINDOW,
 ):
@@ -258,9 +271,11 @@ def create_match(
     slot_count = min(len(slot_lists[side]) for side in SIDES)
     if not _is_int(bench_size) or bench_size < 0:
         _fail(f"Geçersiz bench_size: {bench_size} (0 veya büyük tam sayı olmalı)")
+    if not _is_int(reserve_size) or reserve_size < 0:
+        _fail(f"Geçersiz reserve_size: {reserve_size} (0 veya büyük tam sayı olmalı)")
     if quality_window is not None and (not _is_int(quality_window) or quality_window < 0):
         _fail(f"Geçersiz quality_window: {quality_window} (None veya 0 ve üzeri tam sayı olmalı)")
-    roster_size = slot_count + bench_size
+    roster_size = slot_count + bench_size + reserve_size
     if not _is_int(protect_count) or protect_count < 0 or protect_count > roster_size:
         _fail(f"Geçersiz protect_count: {protect_count} (0..{roster_size} tam sayı olmalı)")
     if not _is_int(steals_per_side) or steals_per_side < 0:
@@ -273,11 +288,11 @@ def create_match(
             _fail(f"{side} tarafı: seçilen kategorilerde oyuncu yok")
         if len(pools[side]) < roster_size:
             _fail(
-                f"{side} tarafı: havuz yetersiz (ilk 11 + yedek için {roster_size} oyuncu "
-                f"gerekli, bulunan {len(pools[side])})"
+                f"{side} tarafı: havuz yetersiz (ilk 11 + yedek + rezerv için {roster_size} "
+                f"oyuncu gerekli, bulunan {len(pools[side])})"
             )
 
-    dealt = _deal_sides(pools, slot_lists, bench_size, seed, quality_window)
+    dealt = _deal_sides(pools, slot_lists, bench_size, reserve_size, seed, quality_window)
 
     state = {
         # Takas yoksa (steals_per_side == 0) da düzen onayı yapılır; sonra sonuç.
@@ -287,6 +302,7 @@ def create_match(
             side: {
                 "slots": dealt[side]["slots"],
                 "bench": dealt[side]["bench"],
+                "reserves": dealt[side]["reserves"],
                 "protected_ids": [],
             }
             for side in SIDES
@@ -384,11 +400,9 @@ def protect(state, side, player_ids):
     return new
 
 
-def swap_bench(state, side, slot_index, bench_index):
-    """İlk 11'deki slot_index oyuncusu ile bench_index yedeğini yer değiştirir.
-    Mülkiyet değişmez, korumalılar da yer değiştirebilir."""
-    _check_state(state)
-    _check_side(side)
+def _check_rearrange(state, side):
+    """Düzenleme kuralı (swap_bench ve swap_reserve): steal fazında yalnızca sırası gelen
+    taraf; arrange fazında taraf henüz onaylamadıysa."""
     phase = state["phase"]
     if phase == "steal":
         if state["turn"] != side:
@@ -399,11 +413,22 @@ def swap_bench(state, side, slot_index, bench_index):
     else:
         _fail(f"Kadro düzenlenemez (faz: {phase})")
 
+
+def _check_index(name, value, size):
+    if not _is_int(value) or not (0 <= value < size):
+        _fail(f"Geçersiz {name}: {value} (0..{size - 1})")
+
+
+def swap_bench(state, side, slot_index, bench_index):
+    """İlk 11'deki slot_index oyuncusu ile bench_index yedeğini yer değiştirir.
+    Mülkiyet değişmez, korumalılar da yer değiştirebilir."""
+    _check_state(state)
+    _check_side(side)
+    _check_rearrange(state, side)
+
     me = state["sides"][side]
-    if not _is_int(slot_index) or not (0 <= slot_index < len(me["slots"])):
-        _fail(f"Geçersiz slot_index: {slot_index} (0..{len(me['slots']) - 1})")
-    if not _is_int(bench_index) or not (0 <= bench_index < len(me["bench"])):
-        _fail(f"Geçersiz bench_index: {bench_index} (0..{len(me['bench']) - 1})")
+    _check_index("slot_index", slot_index, len(me["slots"]))
+    _check_index("bench_index", bench_index, len(me["bench"]))
 
     new = copy.deepcopy(state)
     ns = new["sides"][side]
@@ -411,6 +436,26 @@ def swap_bench(state, side, slot_index, bench_index):
     bench_player = ns["bench"][bench_index]
     ns["slots"][slot_index]["player"] = bench_player
     ns["bench"][bench_index] = slot_player
+    return new
+
+
+def swap_reserve(state, side, bench_index, reserve_index):
+    """bench_index yedeği ile reserve_index rezervini yer değiştirir (ilk 11 ile rezerv
+    doğrudan değişmez). Kurallar swap_bench ile aynı; mülkiyet değişmez."""
+    _check_state(state)
+    _check_side(side)
+    _check_rearrange(state, side)
+
+    me = state["sides"][side]
+    _check_index("bench_index", bench_index, len(me["bench"]))
+    _check_index("reserve_index", reserve_index, len(me["reserves"]))
+
+    new = copy.deepcopy(state)
+    ns = new["sides"][side]
+    bench_player = ns["bench"][bench_index]
+    reserve_player = ns["reserves"][reserve_index]
+    ns["bench"][bench_index] = reserve_player
+    ns["reserves"][reserve_index] = bench_player
     return new
 
 
@@ -436,12 +481,15 @@ def slot_score(slot_pos, player):
 
 
 def team_rating(state, side):
-    """Yalnızca ilk 11 puana katılır; yedekler hesaba girmez."""
+    """İlk 11 (slot_score, uyumsuz pozisyon cezalı) ve yedeklerin (düz rating, ceza yok)
+    ortalaması. Rezervler puana girmez."""
     _check_state(state)
     _check_side(side)
-    slots = state["sides"][side]["slots"]
-    total = sum(slot_score(slot["pos"], slot["player"]) for slot in slots)
-    return round(total / len(slots))
+    me = state["sides"][side]
+    slot_total = sum(slot_score(slot["pos"], slot["player"]) for slot in me["slots"])
+    bench_total = sum(p["rating"] for p in me["bench"])
+    count = len(me["slots"]) + len(me["bench"])
+    return round((slot_total + bench_total) / count)
 
 
 def result(state):
