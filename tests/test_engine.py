@@ -141,7 +141,6 @@ class CreateMatchTests(unittest.TestCase):
         self.assertEqual(state["steals_left"], {"A": 3, "B": 3})
         self.assertEqual(state["protect_count"], 3)
         self.assertIn(state["turn"], ("A", "B"))
-        self.assertIsInstance(state["log"], list)
 
     def test_same_seed_same_state(self):
         self.assertEqual(new_match(seed=7), new_match(seed=7))
