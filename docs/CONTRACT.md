@@ -168,3 +168,31 @@ Bu bölüm önceki bölümlerin ilgili maddelerini geçersiz kılar.
 
 ## Dosya sahipliği (Güncelleme 5)
 v5-engine: `engine.py` | v5-app: `app.py` | v5-tests: `tests/test_engine.py`, `tests/test_app.py`
+
+---
+# Güncelleme 6 (Streamlit): 8 yedek + 4 rezerv, yedekler puana dahil
+Bu bölüm önceki bölümlerin ilgili maddelerini geçersiz kılar (yedek sayısı, puan hesabı).
+
+## Kurallar
+- Her taraf **11 ilk 11 + 8 yedek + 4 rezerv = 23 oyuncu** alır. Yedekler ve rezervler, ilk 11'den sonra tarafın kendi kategori havuzundan, pozisyon fark etmeksizin, **Güncelleme 5'teki kalite penceresi kuralıyla** (her oyuncu kendi pozisyonundaki başlangıç en iyisinden en fazla `quality_window` geride; fallback aynı) ve çakışmasız dağıtılır. Sıra: önce ilk 11 (A,B dönüşümlü), sonra 8 yedek (A,B dönüşümlü), sonra 4 rezerv (A,B dönüşümlü).
+- **Takım puanı = ilk 11 ve 8 yedeğin ortalaması (19 oyuncu):** ilk 11 için `slot_score` (uyumsuz pozisyon −10 aynen), yedekler için düz `rating` (yedeğin slotu yoktur, ceza yok). **Rezervler puana katılmaz.** Sonuç `round()` ile tam sayı.
+- **Takas ve koruma** üç grubun hepsini kapsar (23 oyuncu): rakibin korumasız herhangi bir oyuncusu (ilk 11, yedek veya rezerv) alınabilir; kendi korumasız herhangi bir oyuncun verilebilir; oyuncular birbirinin yerine (slot, yedek sırası veya rezerv sırası) geçer. Koruma en fazla `protect_count` (3).
+- **Yerleştirme:** (a) ilk 11 ↔ yedek (`swap_bench`, mevcut), (b) yedek ↔ rezerv (`swap_reserve`, yeni). İlk 11 ile rezerv doğrudan yer değiştiremez (önce yedeğe geçirilir). Kurallar `swap_bench` ile aynı: `phase=="steal"` ise yalnızca `turn==side`; `phase=="arrange"` ise `arranged[side]` False; korumalılar da yer değiştirebilir, mülkiyet değişmez.
+- Maç akışı aynı: takas+koruma turları, sonra `arrange`, sonra `done`.
+
+## Motor (`engine.py`)
+- `create_match(players, setups, protect_count=3, steals_per_side=3, bench_size=8, reserve_size=4, seed=1, quality_window=10)`.
+- State: `sides[X]["slots"]` (11), `sides[X]["bench"]` (`bench_size`), `sides[X]["reserves"]` (`reserve_size`) oyuncu dict listeleri. Havuz yetersizse `ValueError` (mesajda taraf).
+- `steal`: hedef/verilen oyuncu üç gruptan herhangi birinde olabilir; yer değişimi aynı konuma. `protect`: kendi 23 oyuncusundan.
+- `team_rating(state, side)`: yukarıdaki 19 oyunculu ortalama. `slot_score` aynı. `result` aynı.
+- `swap_reserve(state, side, bench_index, reserve_index)` (yeni): kurallar yukarıda; aralık dışı indeks `ValueError`.
+
+## Uygulama (`app.py`)
+- Sabitler `BENCH_SIZE = 8`, `RESERVE_SIZE = 4`; `create_match` çağrısına geçilir; sayılara bağlı metin ve indeksler state'teki gerçek listelerden türetilir.
+- Kadro ekranı her tarafta ilk 11'i, **Yedekler** (puana dahil) ve **Rezervler** (puana dahil değil) listelerini ayrı gösterir; takım puanı 19 oyunculu ortalamadır ve ekranda "ilk 11 + yedekler" olarak belirtilir.
+- Takas/koruma listeleri 23 oyuncuyu içerir; etiketler `[yedek]` ve `[rezerv]`; korumalılar devre dışı.
+- Yerleştirme bölümü iki araçtır: "İlk 11'den oyuncu" ↔ "Yedekten oyuncu" (`swap_bench`) ve "Yedekten oyuncu" ↔ "Rezervden oyuncu" (`swap_reserve`).
+- Sonuç ekranı ilk 11, yedekler ve rezervleri gösterir; puanın neyi kapsadığı belirtilir.
+
+## Dosya sahipliği (Güncelleme 6)
+v6-engine: `engine.py` | v6-app: `app.py` | v6-tests: `tests/test_engine.py`, `tests/test_app.py`
