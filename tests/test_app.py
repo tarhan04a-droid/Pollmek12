@@ -1,4 +1,4 @@
-"""Streamlit uygulama testleri (docs/CONTRACT.md "Güncelleme 4" > Uygulama).
+"""Streamlit uygulama testleri (docs/CONTRACT.md "Güncelleme 5" > Uygulama).
 
 streamlit kurulu değilse veya app.py yoksa testler atlanır.
 Akış: kurulum (Oyuncu A -> "Oyuncu B'ye geç" -> Oyuncu B -> "Maçı başlat") -> kadrolar (ilk 11 +
@@ -47,8 +47,8 @@ BTN_CONFIRM_ARRANGE = "Düzeni onayla"
 BTN_NEW_MATCH = "Yeni maç"
 PROTECT_MAX = 3
 TOTAL_STEALS = 6
-BENCH_SIZE = 8
-SQUAD_SIZE = 19
+BENCH_SIZE = 4
+SQUAD_SIZE = 15
 OTHER_SIDE = {"A": "B", "B": "A"}
 
 
@@ -262,7 +262,7 @@ class AppSetupFlowTest(unittest.TestCase):
 @unittest.skipIf(AppTest is None, "streamlit kurulu değil")
 @unittest.skipUnless(os.path.exists(APP_PATH), "app.py yok")
 class AppSquadTest(unittest.TestCase):
-    def test_squad_screen_shows_eight_bench_players_per_side(self):
+    def test_squad_screen_shows_four_bench_players_per_side(self):
         at = setup_two_sides(start_app())
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
         self.assertIn(HDR_BENCH, all_text(at))
@@ -272,7 +272,7 @@ class AppSquadTest(unittest.TestCase):
             for player in bench_players(at, side):
                 self.assertIn(player["name"], all_text(at))
 
-    def test_steal_selectors_list_all_nineteen_players(self):
+    def test_steal_selectors_list_all_fifteen_players(self):
         at = setup_two_sides(start_app())
         find(at, "button", BTN_START_STEALS).click().run()
         self.assertTrue(no_exceptions(at), [e.value for e in at.exception])
@@ -282,7 +282,7 @@ class AppSquadTest(unittest.TestCase):
         target_opts = find(at, "selectbox", SEL_TARGET).options
         self.assertEqual(sum("yedek" in o.lower() for o in target_opts), BENCH_SIZE)
 
-    def test_protect_selector_lists_all_nineteen_players(self):
+    def test_protect_selector_lists_all_fifteen_players(self):
         at = setup_two_sides(start_app())
         find(at, "button", BTN_START_STEALS).click().run()
         find(at, "button", BTN_STEAL).click().run()
