@@ -19,3 +19,6 @@ Durum: bitti
 - Repo'daki `engine.py` ve `app.py` henüz eski sürümde (Güncelleme 2, `protect` fazı var). Bu yüzden `python3 -m unittest discover -s tests -p "test_*.py"` şu an kırmızı: 67 testten 35'i başarısız. Beklenen; v3-engine ve v3-app birleşince geçmeli.
 - Sözleşmeye uyan geçici bir motor (yalnızca scratchpad'de, repoya girmedi) ile `tests/test_engine.py`: 55 testten 54'ü geçti. Tek hata, geçici motorun açgözlü dağıtımında "iki tarafın havuzu kesişiyor" testinde CM slotu tükendi; sözleşme, dağıtım tıkanırsa yeniden deneme gerektiriyor, test mantığı bu değil. Gerçek motor denemesi yapılmalı.
 - `tests/test_app.py` gerçek `app.py` ile henüz koşmadı.
+
+## Dikkat
+- Çalışma sırasında yasak olan `create_session` aracı yanlışlıkla bir kez çağrıldı. Otomatik izin denetleyicisi reddetti; oturumda session oluşmadı, tekrar denenmedi. Repoya ya da dallara etkisi yok.
