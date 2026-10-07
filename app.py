@@ -2,7 +2,7 @@
 
 Çalıştırma: streamlit run app.py
 Oyun kuralları engine.py içinde; bu dosya yalnızca arayüzü yönetir.
-Sözleşme: docs/CONTRACT.md > "Güncelleme 2 > Uygulama".
+Sözleşme: docs/CONTRACT.md > "Güncelleme 3 > Uygulama".
 """
 
 import json
@@ -51,7 +51,7 @@ def pool_size(chosen):
 
 
 def reset_match():
-    for key in ("stage", "state", "seed", "setup"):
+    for key in ("stage", "state", "seed", "setup", "new_id"):
         st.session_state.pop(key, None)
     # Kurulum ekranındaki widget durumları da sıfırlansın (A_ ve B_ önekli anahtarlar).
     for key in list(st.session_state.keys()):
@@ -183,7 +183,7 @@ def screen_squads():
     with col_b:
         render_squad("B", state["sides"]["B"], setups["B"]["formation_id"])
 
-    if st.button("Koruma aşamasına geç", type="primary"):
+    if st.button("Takas turlarını başlat", type="primary"):
         st.session_state.stage = "play"
         st.rerun()
     if st.button("Yeni maç"):
@@ -191,40 +191,9 @@ def screen_squads():
         st.rerun()
 
 
-# ---------------------------------------------------------------- koruma
-def screen_protect(state):
-    # İlk koruma yapan A; A'nın korumaları kaydedilince sıra B'ye geçer.
-    side = "B" if state["sides"]["A"]["protected_ids"] else "A"
-    st.title("Koruma")
-    st.subheader(f"Sıra: Oyuncu {side}")
-    st.warning(
-        f"Oyuncu {side} dışındakiler ekrana bakmasın. Kadrosundan tam {PROTECT_COUNT} oyuncu koruyun."
-    )
-    squad = state["sides"][side]["slots"]
-    options = [slot["player"]["id"] for slot in squad]
-    names = {slot["player"]["id"]: label(slot["player"]) for slot in squad}
-    ids = st.multiselect(
-        "Korunacak oyuncular",
-        options=options,
-        format_func=names.get,
-        max_selections=PROTECT_COUNT,
-        key=f"protect_{side}",
-    )
-    if st.button(
-        "Korumayı onayla",
-        type="primary",
-        disabled=len(ids) != PROTECT_COUNT,
-    ):
-        try:
-            st.session_state.state = protect(state, side, ids)
-        except ValueError as e:
-            st.error(str(e))
-            return
-        st.rerun()
-
-
-# ---------------------------------------------------------------- takas
+# ---------------------------------------------------------------- takas (takas + koruma)
 def screen_steal(state):
+    """Sıra sahibinin ekranı: önce takas, takas yapılınca aynı ekranda koruma adımı."""
     turn = state["turn"]
     other = OTHER[turn]
     left = state["steals_left"][turn]
@@ -232,7 +201,14 @@ def screen_steal(state):
     st.subheader(f"Sıra: Oyuncu {turn}")
     st.write(f"Kalan takas hakkı: **{left}** (bu taraf) · **{state['steals_left'][other]}** (rakip)")
     st.warning("Ekranı sadece sırası olan oyuncu görsün.")
+    if state["step"] == "protect":
+        screen_protect_step(state, turn)
+    else:
+        screen_steal_step(state, turn, other, left)
 
+
+def screen_steal_step(state, turn, other, left):
+    st.markdown("**Adım 1/2: Takas**")
     me = state["sides"][turn]
     rival = state["sides"][other]
     rival_prot = set(rival["protected_ids"])
@@ -271,6 +247,39 @@ def screen_steal(state):
         except ValueError as e:
             st.error(str(e))
             return
+        st.session_state.new_id = target  # koruma adımında "yeni" etiketi için
+        st.rerun()
+
+
+def screen_protect_step(state, turn):
+    st.markdown("**Adım 2/2: Koruma**")
+    st.caption(
+        f"Kadronuzdan en fazla {PROTECT_COUNT} oyuncu koruyun; boş onay da serbest. "
+        "Seçim öncekinin yerine geçer."
+    )
+    squad = [slot["player"] for slot in state["sides"][turn]["slots"]]
+    current = set(state["sides"][turn]["protected_ids"])
+    new_id = st.session_state.get("new_id")
+    options = [p["id"] for p in squad]
+    names = {
+        p["id"]: label(p, p["id"] in current) + (" [yeni]" if p["id"] == new_id else "")
+        for p in squad
+    }
+    ids = st.multiselect(
+        "Korunacak oyuncular",
+        options=options,
+        default=[pid for pid in state["sides"][turn]["protected_ids"] if pid in options],
+        format_func=names.get,
+        max_selections=PROTECT_COUNT,
+        key=f"protect_{turn}_{state['steals_left'][turn]}",
+    )
+    if st.button("Korumayı onayla", type="primary"):
+        try:
+            st.session_state.state = protect(state, turn, ids)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        st.session_state.pop("new_id", None)
         st.rerun()
 
 
@@ -307,8 +316,6 @@ def main():
         screen_setup()
     elif stage == "squads":
         screen_squads()
-    elif state["phase"] == "protect":
-        screen_protect(state)
     elif state["phase"] == "steal":
         screen_steal(state)
     else:
