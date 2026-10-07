@@ -24,14 +24,14 @@ formations.json: dizi `{ "id": "4-3-3", "slots": ["GK","LB","CB","CB","RB","CM",
   - state: `{ phase: "protect"|"steal"|"done", sides: { A: Side, B: Side }, turn: "A"|"B", stealsLeft: { A: n, B: n }, protectCount, log: [] }`
   - `Side = { slots: [{ pos, player: Player }], protectedIds: string[] }`
 - `protect(state, side, playerIds)` -> yeni state. Tam `protectCount` id, hepsi o tarafın kadrosunda. İki taraf da koruyunca `phase = "steal"`, `turn = "A"`.
-- `steal(state, side, targetId, giveId)` -> yeni state. Sadece `phase=="steal"` ve `turn==side`. `targetId` rakipte olmalı ve korumasız; `giveId` kendi kadroda. İki oyuncu birbirinin slotuna geçer; `targetId` thief'in `protectedIds`'ine eklenir. Sıra değişir, `stealsLeft` azalır; ikisi de 0 olunca `phase="done"`.
+- `steal(state, side, targetId, giveId)` -> yeni state. Sadece `phase=="steal"` ve `turn==side`. `targetId` rakipte olmalı ve korumasız; `giveId` kendi kadroda ve kendi korumalı oyuncularından biri OLMAMALI (korumalı oyuncu verilemez; motor `Error` fırlatır). İki oyuncu birbirinin slotuna geçer; `targetId` thief'in `protectedIds`'ine eklenir. Sıra değişir, `stealsLeft` azalır; ikisi de 0 olunca `phase="done"`.
 - `slotScore(slotPos, player)` -> `player.pos === slotPos` ise `rating`; `alt` içinde ise `rating`; değilse `rating - 10` (alt sıfırın altına inmez).
 - `teamRating(state, side)` -> 11 slotun `slotScore` ortalaması, tam sayıya yuvarlanmış.
 - `result(state)` -> `{ A, B, winner: "A"|"B"|"draw" }` (yalnızca `phase=="done"`).
 - Aynı seed + aynı hamleler -> aynı sonuç (deterministik; küçük bir PRNG).
 
 ## UI (`index.html`, `src/ui.js`, `styles.css`)
-Motoru `import { createMatch, protect, steal, teamRating, result } from './engine.js'` ile kullanır; veriyi `fetch('data/…json')` ile yükler. Ekranlar: kurulum (kategori arama/seçme) -> kadro gösterimi -> koruma (sıra A sonra B) -> takas turları -> sonuç. Motor kodunu kopyalamaz.
+Motoru `import { createMatch, protect, steal, teamRating, result } from './engine.js'` ile kullanır; veriyi `fetch('data/…json')` ile yükler. Takas ekranında kendi korumalı oyuncular "ver" listesinde devre dışı ve "korumalı" etiketli gösterilir (yalnızca onayda hata çıkmasın). Kurulumda varsayılan formasyon önceden seçilidir (ilk formasyon). Ekranlar: kurulum (kategori arama/seçme) -> kadro gösterimi -> koruma (sıra A sonra B) -> takas turları -> sonuç. Motor kodunu kopyalamaz.
 
 ## Dosya sahipliği
 w1: `data/**` (ham CSV dahil), `docs/data-notes.md` | w2: `src/engine.js` | w3: `index.html`, `src/ui.js`, `styles.css` | w4: `tests/**`
