@@ -1,7 +1,9 @@
 """Rastgele Seçimli Maç motoru (Python). Saf fonksiyonlar, yalnızca standart kütüphane.
 
-Sözleşme: docs/CONTRACT.md > "Güncelleme 2" > Motor. Her oyuncu kendi kategorilerini ve
-formasyonunu seçer; iki taraf farklı havuzlardan dağıtılır.
+Sözleşme: docs/CONTRACT.md > "Güncelleme 3" > Motor (koruma takas turunun içinde).
+Her oyuncu kendi kategorilerini ve formasyonunu seçer; iki taraf farklı havuzlardan dağıtılır.
+Ayrı koruma aşaması yoktur: phase yalnızca "steal" ve "done"; her sırada önce takas,
+sonra koruma adımı gelir (step: "steal" -> "protect" -> "steal" ...).
 State düz dict; hiçbir fonksiyon girdiyi değiştirmez (copy.deepcopy). Hata = ValueError.
 """
 
@@ -101,7 +103,7 @@ def _slot_order(slot_lists):
 
 
 def _try_deal(pools, slot_lists, order, rng):
-    """Bir deneme. Başarısızsa (False, taraf, pozisyon) döner."""
+    """Bir deneme. Başarısızsa (False, taraf, pozisyon, None) döner."""
     shuffled = {side: rng.sample(pools[side], len(pools[side])) for side in SIDES}
     used = set()
     dealt = {side: [] for side in SIDES}
@@ -157,15 +159,15 @@ def create_match(players, setups, protect_count=3, steals_per_side=3, seed=1):
     dealt = _deal_sides(pools, slot_lists, seed)
 
     state = {
-        "phase": "protect",
+        # Takas yoksa (steals_per_side == 0) maç doğrudan biter.
+        "phase": "steal" if steals_per_side > 0 else "done",
+        "step": "steal",
         "sides": {
             side: {"slots": dealt[side], "protected_ids": []} for side in SIDES
         },
         "turn": "A",
         "steals_left": {"A": steals_per_side, "B": steals_per_side},
         "protect_count": protect_count,
-        # Sözleşmede log yok; her iki tarafın koruma yapıp yapmadığını burada tutarız.
-        "protected": {"A": False, "B": False},
         "setups": {
             side: {
                 "categories": [dict(c) for c in setups[side]["categories"]],
@@ -177,40 +179,13 @@ def create_match(players, setups, protect_count=3, steals_per_side=3, seed=1):
     return copy.deepcopy(state)
 
 
-def protect(state, side, player_ids):
-    _check_state(state)
-    _check_side(side)
-    if state["phase"] != "protect":
-        _fail(f"Koruma aşamasında değil (faz: {state['phase']})")
-    if state["protected"][side]:
-        _fail(f"{side} tarafı zaten koruma yaptı")
-    if not isinstance(player_ids, (list, tuple)):
-        _fail("player_ids bir dizi olmalı")
-    player_ids = list(player_ids)
-    if len(player_ids) != state["protect_count"]:
-        _fail(f"Tam {state['protect_count']} oyuncu korunmalı (verilen: {len(player_ids)})")
-    if len(set(player_ids)) != len(player_ids):
-        _fail("Aynı oyuncu birden fazla kez korunamaz")
-    roster = {slot["player"]["id"] for slot in state["sides"][side]["slots"]}
-    for pid in player_ids:
-        if pid not in roster:
-            _fail(f"{pid} {side} tarafının kadrosunda değil")
-
-    new = copy.deepcopy(state)
-    new["sides"][side]["protected_ids"] = player_ids
-    new["protected"][side] = True
-    if all(new["protected"][s] for s in SIDES):
-        new["turn"] = "A"
-        steals_total = new["steals_left"]["A"] + new["steals_left"]["B"]
-        new["phase"] = "done" if steals_total == 0 else "steal"
-    return new
-
-
 def steal(state, side, target_id, give_id):
     _check_state(state)
     _check_side(side)
     if state["phase"] != "steal":
         _fail(f"Takas aşamasında değil (faz: {state['phase']})")
+    if state["step"] != "steal":
+        _fail("Şu an koruma adımı var; önce korumayı onayla")
     if state["turn"] != side:
         _fail(f"Sıra {state['turn']} tarafında, {side} takas yapamaz")
     if state["steals_left"][side] <= 0:
@@ -242,12 +217,44 @@ def steal(state, side, target_id, give_id):
     # Oyuncular birbirinin slotuna geçer; slot pozisyon etiketi yerinde kalır.
     new["sides"][side]["slots"][give_index]["player"] = target_player
     new["sides"][foe]["slots"][target_index]["player"] = give_player
-    new["sides"][side]["protected_ids"] = list(me["protected_ids"]) + [target_id]
+    # Otomatik koruma yok: alınan oyuncu korumalı değildir.
 
     new["steals_left"][side] -= 1
-    new["turn"] = foe
     if new["steals_left"]["A"] == 0 and new["steals_left"]["B"] == 0:
+        # Son takas: koruma adımı atlanır, maç biter.
         new["phase"] = "done"
+    else:
+        # Sıra aynı tarafta kalır; takastan sonra koruma adımı gelir.
+        new["step"] = "protect"
+    return new
+
+
+def protect(state, side, player_ids):
+    _check_state(state)
+    _check_side(side)
+    if state["phase"] != "steal":
+        _fail(f"Koruma aşamasında değil (faz: {state['phase']})")
+    if state["step"] != "protect":
+        _fail("Şu an takas adımı var; koruma yalnızca takastan sonra yapılır")
+    if state["turn"] != side:
+        _fail(f"Sıra {state['turn']} tarafında, {side} koruma yapamaz")
+    if not isinstance(player_ids, (list, tuple)):
+        _fail("player_ids bir dizi olmalı")
+    player_ids = list(player_ids)
+    if len(player_ids) > state["protect_count"]:
+        _fail(f"En fazla {state['protect_count']} oyuncu korunabilir (verilen: {len(player_ids)})")
+    if len(set(player_ids)) != len(player_ids):
+        _fail("Aynı oyuncu birden fazla kez korunamaz")
+    roster = {slot["player"]["id"] for slot in state["sides"][side]["slots"]}
+    for pid in player_ids:
+        if pid not in roster:
+            _fail(f"{pid} {side} tarafının kadrosunda değil")
+
+    new = copy.deepcopy(state)
+    # Bu liste önceki korumanın yerine geçer.
+    new["sides"][side]["protected_ids"] = player_ids
+    new["turn"] = _other(side)
+    new["step"] = "steal"
     return new
 
 
