@@ -1,6 +1,7 @@
-"""Streamlit sürümü motor testleri (docs/CONTRACT.md "Streamlit sürümü > Motor").
+"""Streamlit sürümü motor testleri (docs/CONTRACT.md "Güncelleme 2" > Motor).
 
 Yalnızca standart unittest. engine.py repo kökünde olmalı; bu dosya kökü sys.path'e ekler.
+Yeni imza: create_match(players, setups, protect_count=3, steals_per_side=3, seed=1).
 Çalıştırma (repo kökünden):  python3 -m unittest discover -s tests -p "test_*.py"
 """
 import copy
@@ -15,10 +16,20 @@ if ROOT not in sys.path:
 
 from engine import create_match, protect, result, slot_score, steal, team_rating  # noqa: E402
 
-FORMATION = {
+FORMATION_433 = {
     "id": "4-3-3",
     "slots": ["GK", "LB", "CB", "CB", "RB", "CM", "CM", "CM", "LW", "ST", "RW"],
 }
+FORMATION_442 = {
+    "id": "4-4-2",
+    "slots": ["GK", "LB", "CB", "CB", "RB", "LM", "CM", "CM", "RM", "ST", "ST"],
+}
+FORMATION_352 = {
+    "id": "3-5-2",
+    "slots": ["GK", "CB", "CB", "CB", "LM", "CDM", "CAM", "CM", "RM", "ST", "ST"],
+}
+ALL_FORMATIONS = (FORMATION_433, FORMATION_442, FORMATION_352)
+POSITIONS = sorted({pos for f in ALL_FORMATIONS for pos in f["slots"]})
 
 
 def make_player(pid, pos, club="Alpha", league="L1", nation="Nationa", rating=75, alt=None):
@@ -36,13 +47,13 @@ def make_player(pid, pos, club="Alpha", league="L1", nation="Nationa", rating=75
 
 
 def make_pool():
-    """Alpha: 22 oyuncu (her slot pozisyonundan 2 tane). Beta: 22 oyuncu (L1).
+    """Alpha ve Beta: her pozisyondan 3'er oyuncu (L1; ülkeleri farklı).
     Gamma: sadece 3 ST (yetersiz havuz)."""
     players = []
     pid = 1
     for club, nation in (("Alpha", "Nationa"), ("Beta", "Nationb")):
-        for _ in range(2):
-            for pos in FORMATION["slots"]:
+        for _ in range(3):
+            for pos in POSITIONS:
                 players.append(make_player(pid, pos, club=club, league="L1", nation=nation,
                                            rating=70 + (pid % 20)))
                 pid += 1
@@ -54,11 +65,22 @@ def make_pool():
 
 
 PLAYERS = make_pool()
+PLAYERS_BY_ID = {p["id"]: p for p in PLAYERS}
 CLUB_ALPHA = [{"type": "club", "value": "Alpha"}]
+CLUB_BETA = [{"type": "club", "value": "Beta"}]
+LEAGUE_L1 = [{"type": "league", "value": "L1"}]
 
 
-def new_match(**overrides):
-    kwargs = dict(players=PLAYERS, categories=CLUB_ALPHA, formation=FORMATION, seed=1)
+def setup(categories=CLUB_ALPHA, formation=FORMATION_433):
+    return {"categories": copy.deepcopy(categories), "formation": copy.deepcopy(formation)}
+
+
+def default_setups():
+    return {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_433)}
+
+
+def new_match(setups=None, **overrides):
+    kwargs = dict(players=PLAYERS, setups=setups if setups is not None else default_setups(), seed=1)
     kwargs.update(overrides)
     return create_match(**kwargs)
 
@@ -103,24 +125,104 @@ def find_slot_index(state, side, pid):
 
 
 class CreateMatchTests(unittest.TestCase):
-    def test_pool_too_small_raises(self):
-        with self.assertRaises(ValueError):
-            new_match(categories=[{"type": "club", "value": "Gamma"}])
+    def test_pool_too_small_raises_and_names_side(self):
+        setups = default_setups()
+        setups["B"] = setup([{"type": "club", "value": "Gamma"}], FORMATION_433)
+        with self.assertRaises(ValueError) as cm:
+            new_match(setups=setups)
+        self.assertRegex(str(cm.exception), r"\bB\b")
 
     def test_no_matching_category_raises(self):
+        setups = default_setups()
+        setups["A"] = setup([{"type": "nation", "value": "Yokhayir"}], FORMATION_433)
         with self.assertRaises(ValueError):
-            new_match(categories=[{"type": "nation", "value": "Yokhayir"}])
+            new_match(setups=setups)
 
-    def test_both_sides_get_every_slot_in_formation_order(self):
-        state = new_match()
+    def test_zero_categories_raises_with_side_A(self):
+        setups = default_setups()
+        setups["A"] = setup([], FORMATION_433)
+        with self.assertRaises(ValueError) as cm:
+            new_match(setups=setups)
+        self.assertRegex(str(cm.exception), r"\bA\b")
+
+    def test_zero_categories_raises_with_side_B(self):
+        setups = default_setups()
+        setups["B"] = setup([], FORMATION_433)
+        with self.assertRaises(ValueError) as cm:
+            new_match(setups=setups)
+        self.assertRegex(str(cm.exception), r"\bB\b")
+
+    def test_five_categories_raises_with_side(self):
+        five = [
+            {"type": "club", "value": "Alpha"},
+            {"type": "club", "value": "Beta"},
+            {"type": "league", "value": "L1"},
+            {"type": "nation", "value": "Nationa"},
+            {"type": "nation", "value": "Nationb"},
+        ]
         for side in ("A", "B"):
+            setups = default_setups()
+            setups[side] = setup(five, FORMATION_433)
+            with self.subTest(side=side), self.assertRaises(ValueError) as cm:
+                new_match(setups=setups)
+            self.assertRegex(str(cm.exception), rf"\b{side}\b")
+
+    def test_four_categories_allowed(self):
+        four = [
+            {"type": "club", "value": "Alpha"},
+            {"type": "club", "value": "Beta"},
+            {"type": "league", "value": "L1"},
+            {"type": "nation", "value": "Nationa"},
+        ]
+        setups = default_setups()
+        setups["A"] = setup(four, FORMATION_433)
+        state = new_match(setups=setups)
+        self.assertEqual(len(squad_ids(state, "A")), 11)
+
+    def test_each_side_gets_eleven_slots_in_its_own_formation_order(self):
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
+        state = new_match(setups=setups)
+        for side, formation in (("A", FORMATION_433), ("B", FORMATION_442)):
             slots = state["sides"][side]["slots"]
             self.assertEqual(len(slots), 11)
-            self.assertEqual([s["pos"] for s in slots], FORMATION["slots"])
+            self.assertEqual([s["pos"] for s in slots], formation["slots"])
             self.assertEqual(state["sides"][side]["protected_ids"], [])
 
-    def test_no_player_on_both_sides_and_no_duplicates_within_side(self):
-        state = new_match(categories=[{"type": "league", "value": "L1"}])
+    def test_different_formations_both_recorded_in_state(self):
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_352)}
+        state = new_match(setups=setups)
+        self.assertEqual(state["setups"]["A"]["formation_id"], "4-3-3")
+        self.assertEqual(state["setups"]["B"]["formation_id"], "3-5-2")
+        self.assertEqual(state["setups"]["A"]["categories"], CLUB_ALPHA)
+        self.assertEqual(state["setups"]["B"]["categories"], CLUB_BETA)
+
+    def test_each_side_player_comes_only_from_its_own_categories(self):
+        setups = {
+            "A": setup([{"type": "club", "value": "Alpha"}], FORMATION_433),
+            "B": setup([{"type": "club", "value": "Beta"}, {"type": "nation", "value": "Nationb"}],
+                       FORMATION_442),
+        }
+        state = new_match(setups=setups)
+        for pid in squad_ids(state, "A"):
+            self.assertEqual(PLAYERS_BY_ID[pid]["club"], "Alpha")
+        for pid in squad_ids(state, "B"):
+            p = PLAYERS_BY_ID[pid]
+            self.assertTrue(p["club"] == "Beta" or p["nation"] == "Nationb")
+
+    def test_overlapping_pools_player_only_on_one_side(self):
+        setups = {
+            "A": setup(CLUB_ALPHA, FORMATION_433),
+            "B": setup(LEAGUE_L1, FORMATION_442),
+        }
+        state = new_match(setups=setups)
+        a, b = squad_ids(state, "A"), squad_ids(state, "B")
+        self.assertEqual(len(set(a)), 11)
+        self.assertEqual(len(set(b)), 11)
+        self.assertEqual(set(a) & set(b), set())
+
+    def test_identical_pools_no_player_on_both_sides(self):
+        setups = {"A": setup(LEAGUE_L1, FORMATION_433), "B": setup(LEAGUE_L1, FORMATION_433)}
+        state = new_match(setups=setups)
         a, b = squad_ids(state, "A"), squad_ids(state, "B")
         self.assertEqual(len(set(a)), 11)
         self.assertEqual(len(set(b)), 11)
@@ -128,8 +230,9 @@ class CreateMatchTests(unittest.TestCase):
 
     def test_dealt_player_fits_slot_by_pos_or_alt(self):
         pool = [make_player(i, "LW", alt=["ST"]) for i in range(1, 23)]
-        state = create_match(players=pool, categories=CLUB_ALPHA,
-                             formation={"id": "x", "slots": ["ST"] * 11}, seed=5)
+        formation = {"id": "x", "slots": ["ST"] * 11}
+        setups = {"A": setup(CLUB_ALPHA, formation), "B": setup(CLUB_ALPHA, formation)}
+        state = create_match(players=pool, setups=setups, seed=5)
         for side in ("A", "B"):
             for slot in state["sides"][side]["slots"]:
                 self.assertTrue(slot["player"]["pos"] == slot["pos"]
@@ -145,17 +248,20 @@ class CreateMatchTests(unittest.TestCase):
     def test_same_seed_same_state(self):
         self.assertEqual(new_match(seed=7), new_match(seed=7))
 
+    def test_same_seed_same_state_with_different_formations(self):
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
+        self.assertEqual(new_match(setups=setups, seed=9), new_match(setups=setups, seed=9))
+
     def test_different_seed_different_deal(self):
         self.assertNotEqual(squad_ids(new_match(seed=1), "A"), squad_ids(new_match(seed=2), "A"))
 
     def test_inputs_are_not_mutated(self):
         players = copy.deepcopy(PLAYERS)
-        categories = [{"type": "club", "value": "Alpha"}]
-        formation = copy.deepcopy(FORMATION)
-        create_match(players=players, categories=categories, formation=formation, seed=3)
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
+        setups_before = copy.deepcopy(setups)
+        create_match(players=players, setups=setups, seed=3)
         self.assertEqual(players, PLAYERS)
-        self.assertEqual(categories, [{"type": "club", "value": "Alpha"}])
-        self.assertEqual(formation, FORMATION)
+        self.assertEqual(setups, setups_before)
 
 
 class ProtectTests(unittest.TestCase):
@@ -239,6 +345,21 @@ class StealRuleTests(unittest.TestCase):
         self.assertEqual(len(set(squad_ids(new, "A"))), 11)
         self.assertEqual(len(set(squad_ids(new, "B"))), 11)
 
+    def test_swap_with_different_formations_keeps_each_side_layout(self):
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
+        state = ready_for_steal(setups=setups)
+        target = unprotected_ids(state, "B")[0]
+        give = unprotected_ids(state, "A")[0]
+        idx_a = find_slot_index(state, "A", give)
+        idx_b = find_slot_index(state, "B", target)
+
+        new = steal(state, "A", target, give)
+
+        self.assertEqual([s["pos"] for s in new["sides"]["A"]["slots"]], FORMATION_433["slots"])
+        self.assertEqual([s["pos"] for s in new["sides"]["B"]["slots"]], FORMATION_442["slots"])
+        self.assertEqual(new["sides"]["A"]["slots"][idx_a]["player"]["id"], target)
+        self.assertEqual(new["sides"]["B"]["slots"][idx_b]["player"]["id"], give)
+
     def test_stolen_player_becomes_protected_for_thief(self):
         state = ready_for_steal()
         target = unprotected_ids(state, "B")[0]
@@ -302,8 +423,9 @@ class SlotScoreTests(unittest.TestCase):
 
 
 class TeamRatingAndResultTests(unittest.TestCase):
-    def test_team_rating_is_rounded_mean_of_slot_scores(self):
-        state = ready_for_steal()
+    def test_team_rating_is_rounded_mean_of_own_slot_scores(self):
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_433), "B": setup(CLUB_BETA, FORMATION_442)}
+        state = ready_for_steal(setups=setups)
         for side in ("A", "B"):
             scores = [slot_score(s["pos"], s["player"]) for s in state["sides"][side]["slots"]]
             self.assertEqual(team_rating(state, side), round(sum(scores) / 11))
@@ -333,9 +455,16 @@ class DeterminismTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(result(first), result(second))
 
+    def test_same_seed_and_moves_with_different_formations(self):
+        setups = {"A": setup(CLUB_ALPHA, FORMATION_352), "B": setup(CLUB_BETA, FORMATION_433)}
+        first = play_out(ready_for_steal(setups=setups, seed=4))
+        second = play_out(ready_for_steal(setups=setups, seed=4))
+        self.assertEqual(first, second)
+        self.assertEqual(result(first), result(second))
+
 
 class RealDataEndToEndTests(unittest.TestCase):
-    """Gerçek data/*.json ile tam maç: 3 koruma + 6 takas."""
+    """Gerçek data/*.json ile tam maç: farklı kategori + farklı formasyon, 3 koruma + 6 takas."""
 
     @classmethod
     def setUpClass(cls):
@@ -344,18 +473,32 @@ class RealDataEndToEndTests(unittest.TestCase):
                 return json.load(fh)
 
         cls.players = load("players.json")
-        formations = load("formations.json")
-        cls.formation = next(f for f in formations if f["id"] == "4-3-3")
+        cls.formations = load("formations.json")
+
+    def formation(self, fid):
+        return next(f for f in self.formations if f["id"] == fid)
+
+    def build(self, seed=1):
+        setups = {
+            "A": setup([{"type": "nation", "value": "England"}], self.formation("4-3-3")),
+            "B": setup([{"type": "league", "value": "Premier League"}], self.formation("4-4-2")),
+        }
+        return create_match(players=self.players, setups=setups,
+                            protect_count=3, steals_per_side=3, seed=seed)
+
+    def test_real_data_deal_respects_categories_and_disjointness(self):
+        state = self.build()
+        by_id = {p["id"]: p for p in self.players}
+        for pid in squad_ids(state, "A"):
+            self.assertEqual(by_id[pid]["nation"], "England")
+        for pid in squad_ids(state, "B"):
+            self.assertEqual(by_id[pid]["league"], "Premier League")
+        self.assertEqual(set(squad_ids(state, "A")) & set(squad_ids(state, "B")), set())
+        self.assertEqual([s["pos"] for s in state["sides"]["B"]["slots"]],
+                         self.formation("4-4-2")["slots"])
 
     def test_full_match_with_six_steals(self):
-        state = create_match(
-            players=self.players,
-            categories=[{"type": "league", "value": "Premier League"}],
-            formation=self.formation,
-            protect_count=3,
-            steals_per_side=3,
-            seed=1,
-        )
+        state = self.build()
         k = state["protect_count"]
         state = protect(state, "A", squad_ids(state, "A")[:k])
         state = protect(state, "B", squad_ids(state, "B")[:k])
