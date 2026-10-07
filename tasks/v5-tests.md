@@ -1,0 +1,4 @@
+# v5-tests — Python testleri
+Rapor: `reports/v5-tests.md`
+`docs/CONTRACT.md` > "Güncelleme 5" bölümüne göre `tests/test_engine.py` ve `tests/test_app.py`'yi güncelle: her tarafta 11+4 oyuncu; sentetik havuzda kaleci 90/80/71/68 iken kaleci slotuna 71 ve 68 asla gelmez (50 seed); gerçek veriyle Real Madrid + Gençlerbirliği havuzunda aynı kontrol (>= 100 seed); bir pozisyonda en iyiden 10'dan fazla geride oyuncu ilk 11'e veya yedeğe seçilmez (pencere dışı oyuncu yoksa istisna olarak havuz yeterliliği); quality_window=None eski davranışta pencere dışı oyuncuya izin verir; determinizm; takas/koruma/arrange kurallarındaki "8" varsayımlarını 4'e çevir. AppTest notları: `.options` etiketlerdir, ilk 11/yedek selectbox'ları indeks ister, takas hedefi id ister (id'leri session_state'ten al); yedek etiketi '[yedek]' (küçük harf). Çalıştırma: `python3 -m unittest discover -s tests -p "test_*.py"`.
+Sahip: `tests/test_engine.py`, `tests/test_app.py`.

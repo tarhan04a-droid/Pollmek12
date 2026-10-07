@@ -145,3 +145,24 @@ Bu bölüm önceki bölümlerin ilgili maddelerini geçersiz kılar.
 
 ## Dosya sahipliği (Güncelleme 4)
 v4-engine: `engine.py` | v4-app: `app.py` | v4-tests: `tests/test_engine.py`, `tests/test_app.py`
+
+---
+# Güncelleme 5 (Streamlit): 4 yedek ve kaliteye duyarlı dağıtım
+Bu bölüm önceki bölümlerin ilgili maddelerini geçersiz kılar.
+
+## Kurallar
+- **Yedek sayısı 4** (önceki 8 yerine); toplam 15 oyuncu/taraf. Varsayılan `bench_size=4`; uygulama sayıyı sabit yazmaz, state'teki yedek listesinden okur.
+- **Dağıtım kaliteye duyarlıdır** (rastgelelik "kalite penceresi" içinde): bir slot veya yedek için aday oyuncular, kendi pozisyonlarındaki *havuzda kalan en iyi oyuncudan en fazla `quality_window` (varsayılan 10) puan geride* olanlardır; seçim bu adaylar arasından seed'li ve eşit olasılıklıdır.
+  - İlk 11 slotu: adaylar önce `pos == slot` olanlardır; yoksa `alt` içinde slot olanlar. En iyi, bu aday kümesindeki en yüksek `rating`'dir.
+  - Yedek: kalan havuzdaki her oyuncu, **kendi birincil pozisyonundaki kalan en iyi oyuncuya** göre değerlendirilir (en fazla `quality_window` geride ise aday); pozisyon fark etmez.
+  - Örnek: havuzda kaleciler 90, 80, 71, 68 ise kaleci slotuna yalnızca 90 veya 80 gelebilir.
+- Dağıtım yine dönüşümlü (A, B), iki tarafa aynı oyuncu verilmez, aynı seed aynı sonuç; tıkanırsa yeniden deneme (en fazla 50) ve `ValueError`.
+
+## Motor (`engine.py`)
+`create_match(players, setups, protect_count=3, steals_per_side=3, bench_size=4, seed=1, quality_window=10)`. `quality_window=None` kaliteyi kapatır (eski tam rastgele davranış). Diğer her şey (takas, koruma, yerleştirme, arrange) aynı.
+
+## Uygulama (`app.py`)
+`BENCH_SIZE` sabiti 4 olur ve `create_match(..., bench_size=BENCH_SIZE)` ile geçilir; yedek sayısına bağlı her metin/indeks state'teki gerçek yedek listesinden türetilir ("8" gibi sabit yazma yok).
+
+## Dosya sahipliği (Güncelleme 5)
+v5-engine: `engine.py` | v5-app: `app.py` | v5-tests: `tests/test_engine.py`, `tests/test_app.py`
