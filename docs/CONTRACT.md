@@ -152,10 +152,12 @@ Bu bölüm önceki bölümlerin ilgili maddelerini geçersiz kılar.
 
 ## Kurallar
 - **Yedek sayısı 4** (önceki 8 yerine); toplam 15 oyuncu/taraf. Varsayılan `bench_size=4`; uygulama sayıyı sabit yazmaz, state'teki yedek listesinden okur.
-- **Dağıtım kaliteye duyarlıdır** (rastgelelik "kalite penceresi" içinde): bir slot veya yedek için aday oyuncular, kendi pozisyonlarındaki *havuzda kalan en iyi oyuncudan en fazla `quality_window` (varsayılan 10) puan geride* olanlardır; seçim bu adaylar arasından seed'li ve eşit olasılıklıdır.
-  - İlk 11 slotu: adaylar önce `pos == slot` olanlardır; yoksa `alt` içinde slot olanlar. En iyi, bu aday kümesindeki en yüksek `rating`'dir.
-  - Yedek: kalan havuzdaki her oyuncu, **kendi birincil pozisyonundaki kalan en iyi oyuncuya** göre değerlendirilir (en fazla `quality_window` geride ise aday); pozisyon fark etmez.
-  - Örnek: havuzda kaleciler 90, 80, 71, 68 ise kaleci slotuna yalnızca 90 veya 80 gelebilir.
+- **Dağıtım kaliteye duyarlıdır** (rastgelelik "kalite penceresi" içinde): bir slot veya yedek için aday oyuncular, kendi pozisyonlarında **havuzun BAŞLANGIÇTAKİ en iyi oyuncusundan** (kullanılmış olsa bile) en fazla `quality_window` (varsayılan 10) puan geride olan, hâlâ kullanılmamış oyunculardır; seçim bu adaylar arasından seed'li ve eşit olasılıklıdır. (Kalan en iyiye göre ölçmek yanlıştır: biri en iyiyi alınca pencere kayar ve zayıf oyuncu girer.)
+  - Taraf kendi havuzuna göre hesaplanır; iki taraf aynı havuzu paylaşıyorsa ortak "başlangıç en iyisi" kullanılır.
+  - İlk 11 slotu: adaylar önce `pos == slot` olanlardır; yoksa `alt` içinde slot olanlar. Başlangıç en iyisi, bu aday kümesinin başlangıçtaki en yüksek `rating`'idir.
+  - Yedek: kalan her oyuncu, **kendi birincil pozisyonundaki başlangıç en iyisine** göre değerlendirilir (en fazla `quality_window` geride ise aday); pozisyon fark etmez.
+  - **Geri çekilme (fallback):** aday kümesi boşsa (pencerede kullanılmamış oyuncu kalmadıysa) pencere, o andaki *kalan en iyiye* göre uygulanır; o da boşsa kalan herkes aday olur. Böylece dağıtım tıkanmaz.
+  - Örnek: havuzda kaleciler 90, 80, 71, 68 ise kaleci slotuna yalnızca 90 veya 80 gelir (iki taraf aynı havuzdaysa biri 90, diğeri 80 alır; 71 ve 68 ancak pencerede kimse kalmazsa gelebilir, bu örnekte gelmez).
 - Dağıtım yine dönüşümlü (A, B), iki tarafa aynı oyuncu verilmez, aynı seed aynı sonuç; tıkanırsa yeniden deneme (en fazla 50) ve `ValueError`.
 
 ## Motor (`engine.py`)
