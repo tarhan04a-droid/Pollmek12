@@ -1,7 +1,9 @@
 // Motor testleri (docs/CONTRACT.md "Motor" bölümü).
-// Veri sabit ve testin içinde tanımlı; gerçek data/ dosyalarına bağımlı değil.
+// Birim testlerinin verisi sabit ve testin içinde tanımlı. Sondaki uçtan uca test
+// gerçek data/players.json ve data/formations.json dosyalarını okur.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   createMatch,
   protect,
@@ -10,6 +12,8 @@ import {
   teamRating,
   result,
 } from '../src/engine.js';
+
+const readJson = (rel) => JSON.parse(readFileSync(new URL(rel, import.meta.url), 'utf8'));
 
 const FORMATION = {
   id: '4-3-3',
@@ -228,6 +232,27 @@ describe('steal', () => {
     assert.throws(() => steal(s, 'A', target, notMine), Error);
   });
 
+  test('giveId kendi korumalı oyuncusuysa Error (korumalı oyuncu verilemez)', () => {
+    const s = readyForSteal();
+    const target = unprotected(s, 'B')[0];
+    const protectedGive = s.sides.A.protectedIds[0];
+    assert.throws(() => steal(s, 'A', target, protectedGive), Error);
+  });
+
+  test('korumasız giveId ile takas başarılı: sıra değişir, stealsLeft azalır, alınan oyuncu korumalı olur', () => {
+    const s0 = readyForSteal();
+    const target = unprotected(s0, 'B')[0];
+    const give = unprotected(s0, 'A')[0];
+    assert.ok(!s0.sides.A.protectedIds.includes(give));
+
+    const s1 = steal(s0, 'A', target, give);
+
+    assert.equal(s1.turn, 'B');
+    assert.equal(s1.stealsLeft.A, s0.stealsLeft.A - 1);
+    assert.ok(s1.sides.A.protectedIds.includes(target));
+    assert.ok(squadIds(s1, 'B').includes(give));
+  });
+
   test('geçerli takas: iki oyuncu birbirinin slotuna geçer, slot pozisyonları değişmez', () => {
     const s0 = readyForSteal();
     const target = unprotected(s0, 'B')[0];
@@ -376,5 +401,50 @@ describe('determinizm (tam maç)', () => {
       return { state: s, result: result(s) };
     };
     assert.deepEqual(play(), play());
+  });
+});
+
+describe('uçtan uca (gerçek veri)', () => {
+  test('Real Madrid + FC Barcelona + Manchester City, 4-3-3, seed sabit: 3+3 koruma, 6 takas, done, result', () => {
+    const players = readJson('../data/players.json');
+    const formations = readJson('../data/formations.json');
+    const formation = formations.find((f) => f.id === '4-3-3');
+    assert.ok(formation, '4-3-3 formasyonu data/formations.json içinde olmalı');
+
+    const categories = [
+      { type: 'club', value: 'Real Madrid' },
+      { type: 'club', value: 'FC Barcelona' },
+      { type: 'club', value: 'Manchester City' },
+    ];
+    let s = createMatch({ players, categories, formation, seed: 2026 });
+    assert.equal(s.phase, 'protect');
+
+    // Her iki taraf kadrosundan ilk 3 oyuncuyu korur.
+    s = protect(s, 'A', squadIds(s, 'A').slice(0, 3));
+    s = protect(s, 'B', squadIds(s, 'B').slice(0, 3));
+    assert.equal(s.phase, 'steal');
+    assert.equal(s.turn, 'A');
+    assert.equal(s.sides.A.protectedIds.length, 3);
+    assert.equal(s.sides.B.protectedIds.length, 3);
+
+    // 6 takas: A,B,A,B,A,B. Her turda rakipten korumasız, kendinden korumasız oyuncu.
+    for (const side of ['A', 'B', 'A', 'B', 'A', 'B']) {
+      const opp = other(side);
+      const target = unprotected(s, opp)[0];
+      const give = unprotected(s, side)[0];
+      assert.ok(target && give, `${side} için takas adayı yok`);
+      assert.ok(!s.sides[opp].protectedIds.includes(target));
+      assert.ok(!s.sides[side].protectedIds.includes(give));
+      s = steal(s, side, target, give);
+    }
+
+    assert.equal(s.phase, 'done');
+    assert.deepEqual(s.stealsLeft, { A: 0, B: 0 });
+
+    const r = result(s);
+    assert.deepEqual(Object.keys(r).sort(), ['A', 'B', 'winner']);
+    assert.equal(r.A, teamRating(s, 'A'));
+    assert.equal(r.B, teamRating(s, 'B'));
+    assert.ok(['A', 'B', 'draw'].includes(r.winner));
   });
 });
