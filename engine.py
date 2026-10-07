@@ -1,6 +1,7 @@
 """Rastgele Seçimli Maç motoru (Python). Saf fonksiyonlar, yalnızca standart kütüphane.
 
-Sözleşme: docs/CONTRACT.md > "Streamlit sürümü" > Motor. src/engine.js ile aynı kurallar.
+Sözleşme: docs/CONTRACT.md > "Güncelleme 2" > Motor. Her oyuncu kendi kategorilerini ve
+formasyonunu seçer; iki taraf farklı havuzlardan dağıtılır.
 State düz dict; hiçbir fonksiyon girdiyi değiştirmez (copy.deepcopy). Hata = ValueError.
 """
 
@@ -9,7 +10,11 @@ import random
 
 SIDES = ("A", "B")
 CATEGORY_TYPES = ("club", "league", "nation")
+MIN_CATEGORIES = 1
+MAX_CATEGORIES = 4
+FORMATION_SLOTS = 11
 ALT_PENALTY = 10
+MAX_DEAL_ATTEMPTS = 50
 
 
 def _fail(message):
@@ -39,48 +44,40 @@ def _matches_category(player, category):
     return player.get(category["type"]) == category["value"]
 
 
-def _deal_sides(pool, slot_positions, rng):
-    """Önce tam pozisyon, yoksa alt pozisyon. İki taraf aynı havuzdan tekrarsız çekilir."""
-    used = set()
-    dealt = {}
-    for side in SIDES:
-        slots = []
-        for pos in slot_positions:
-            free = [p for p in pool if p["id"] not in used]
-            candidates = [p for p in free if p["pos"] == pos]
-            if not candidates:
-                candidates = [p for p in free if pos in (p.get("alt") or [])]
-            if not candidates:
-                _fail(f'Havuz yetersiz: {side} tarafının "{pos}" slotu için uygun oyuncu kalmadı')
-            player = rng.choice(candidates)
-            used.add(player["id"])
-            slots.append({"pos": pos, "player": player})
-        dealt[side] = slots
-    return dealt
+def _check_setup(side, setup):
+    if not isinstance(setup, dict):
+        _fail(f"{side} tarafı için setup eksik (categories ve formation gerekli)")
 
-
-def create_match(players, categories, formation, protect_count=3, steals_per_side=3, seed=1):
-    if not isinstance(players, list) or len(players) == 0:
-        _fail("Oyuncu listesi boş")
-    if not isinstance(categories, list) or len(categories) == 0:
-        _fail("En az bir kategori seçilmeli")
+    categories = setup.get("categories")
+    if not isinstance(categories, list):
+        _fail(f"{side} tarafı: categories bir dizi olmalı")
+    if not (MIN_CATEGORIES <= len(categories) <= MAX_CATEGORIES):
+        _fail(
+            f"{side} tarafı: {MIN_CATEGORIES}-{MAX_CATEGORIES} kategori seçilmeli "
+            f"(verilen: {len(categories)})"
+        )
     for category in categories:
         if (
             not isinstance(category, dict)
             or category.get("type") not in CATEGORY_TYPES
             or not isinstance(category.get("value"), str)
         ):
-            _fail(f"Geçersiz kategori: {category!r} (type club|league|nation, value metin olmalı)")
-    if not isinstance(formation, dict) or not isinstance(formation.get("slots"), list) or not formation["slots"]:
-        _fail("Geçersiz formasyon: slots dolu bir dizi olmalı")
-    if any(not isinstance(slot, str) or slot == "" for slot in formation["slots"]):
-        _fail("Geçersiz formasyon: her slot bir pozisyon metni olmalı")
-    slot_count = len(formation["slots"])
-    if not _is_int(protect_count) or protect_count < 0 or protect_count > slot_count:
-        _fail(f"Geçersiz protect_count: {protect_count} (0..{slot_count} tam sayı olmalı)")
-    if not _is_int(steals_per_side) or steals_per_side < 0:
-        _fail(f"Geçersiz steals_per_side: {steals_per_side} (0 veya büyük tam sayı olmalı)")
+            _fail(
+                f"{side} tarafı: geçersiz kategori {category!r} "
+                "(type club|league|nation, value metin olmalı)"
+            )
 
+    formation = setup.get("formation")
+    if not isinstance(formation, dict) or not isinstance(formation.get("id"), str):
+        _fail(f"{side} tarafı: formation {{id, slots}} sözlüğü olmalı")
+    slots = formation.get("slots")
+    if not isinstance(slots, list) or len(slots) != FORMATION_SLOTS:
+        _fail(f"{side} tarafı: formasyonda tam {FORMATION_SLOTS} slot olmalı")
+    if any(not isinstance(slot, str) or slot == "" for slot in slots):
+        _fail(f"{side} tarafı: her slot bir pozisyon metni olmalı")
+
+
+def _build_pool(players, categories):
     seen = set()
     pool = []
     for player in players:
@@ -89,23 +86,93 @@ def create_match(players, categories, formation, protect_count=3, steals_per_sid
         if any(_matches_category(player, c) for c in categories):
             seen.add(player["id"])
             pool.append(player)
-    if not pool:
-        _fail("Seçilen kategorilerde oyuncu yok")
+    return pool
 
-    rng = random.Random(seed)
-    dealt = _deal_sides(pool, formation["slots"], rng)
+
+def _slot_order(slot_lists):
+    """Dağıtım sırası: A slot1, B slot1, A slot2, B slot2, ..."""
+    order = []
+    longest = max(len(slot_lists[side]) for side in SIDES)
+    for i in range(longest):
+        for side in SIDES:
+            if i < len(slot_lists[side]):
+                order.append((side, i))
+    return order
+
+
+def _try_deal(pools, slot_lists, order, rng):
+    """Bir deneme. Başarısızsa (False, taraf, pozisyon) döner."""
+    shuffled = {side: rng.sample(pools[side], len(pools[side])) for side in SIDES}
+    used = set()
+    dealt = {side: [] for side in SIDES}
+    for side, index in order:
+        pos = slot_lists[side][index]
+        free = [p for p in shuffled[side] if p["id"] not in used]
+        pick = next((p for p in free if p["pos"] == pos), None)
+        if pick is None:
+            pick = next((p for p in free if pos in (p.get("alt") or [])), None)
+        if pick is None:
+            return False, side, pos, None
+        used.add(pick["id"])
+        dealt[side].append({"pos": pos, "player": copy.deepcopy(pick)})
+    return True, None, None, dealt
+
+
+def _deal_sides(pools, slot_lists, seed):
+    """İki tarafı çakışmasız dağıtır. Tıkanırsa seed'den türetilen yeni karıştırmayla
+    en fazla MAX_DEAL_ATTEMPTS kez dener; hâlâ olmazsa ValueError."""
+    order = _slot_order(slot_lists)
+    failure = None
+    for attempt in range(MAX_DEAL_ATTEMPTS):
+        rng = random.Random(seed) if attempt == 0 else random.Random(f"{seed}:{attempt}")
+        ok, side, pos, dealt = _try_deal(pools, slot_lists, order, rng)
+        if ok:
+            return dealt
+        failure = (side, pos)
+    side, pos = failure
+    _fail(f'Havuz yetersiz: {side} tarafının "{pos}" slotu için uygun oyuncu kalmadı')
+
+
+def create_match(players, setups, protect_count=3, steals_per_side=3, seed=1):
+    if not isinstance(players, list) or len(players) == 0:
+        _fail("Oyuncu listesi boş")
+    if not isinstance(setups, dict) or set(setups.keys()) != set(SIDES):
+        _fail('setups {"A": {...}, "B": {...}} biçiminde olmalı')
+    for side in SIDES:
+        _check_setup(side, setups[side])
+
+    slot_lists = {side: setups[side]["formation"]["slots"] for side in SIDES}
+    slot_count = min(len(slot_lists[side]) for side in SIDES)
+    if not _is_int(protect_count) or protect_count < 0 or protect_count > slot_count:
+        _fail(f"Geçersiz protect_count: {protect_count} (0..{slot_count} tam sayı olmalı)")
+    if not _is_int(steals_per_side) or steals_per_side < 0:
+        _fail(f"Geçersiz steals_per_side: {steals_per_side} (0 veya büyük tam sayı olmalı)")
+
+    pools = {}
+    for side in SIDES:
+        pools[side] = _build_pool(players, setups[side]["categories"])
+        if not pools[side]:
+            _fail(f"{side} tarafı: seçilen kategorilerde oyuncu yok")
+
+    dealt = _deal_sides(pools, slot_lists, seed)
 
     state = {
         "phase": "protect",
         "sides": {
-            "A": {"slots": dealt["A"], "protected_ids": []},
-            "B": {"slots": dealt["B"], "protected_ids": []},
+            side: {"slots": dealt[side], "protected_ids": []} for side in SIDES
         },
         "turn": "A",
         "steals_left": {"A": steals_per_side, "B": steals_per_side},
         "protect_count": protect_count,
         # Sözleşmede log yok; her iki tarafın koruma yapıp yapmadığını burada tutarız.
         "protected": {"A": False, "B": False},
+        "setups": {
+            side: {
+                "categories": [dict(c) for c in setups[side]["categories"]],
+                "formation_id": setups[side]["formation"]["id"],
+            }
+            for side in SIDES
+        },
     }
     return copy.deepcopy(state)
 
